@@ -754,3 +754,14 @@ index 32d9614..28bac77 100644
 +        convertECSchema(ecZoneProto.getSchema()), ecZoneProto.getCellSize());
 +  }
  }
+diff --git a/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/common/HdfsServerConstants.java b/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/common/HdfsServerConstants.java
+index 26a7ab3..250fca5 100644
+--- a/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/common/HdfsServerConstants.java
++++ b/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/common/HdfsServerConstants.java
+@@ -396,4 +396,6 @@ public void write(DataOutput out) throws IOException {
+       "raw.hdfs.crypto.file.encryption.info";
+   String SECURITY_XATTR_UNREADABLE_BY_SUPERUSER =
+       "security.hdfs.unreadable.by.superuser";
++  String XATTR_ERASURECODING_ZONE =
++      "raw.hdfs.erasurecoding.zone";
+ }

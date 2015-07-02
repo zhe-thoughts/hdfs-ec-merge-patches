@@ -730,3 +730,127 @@ index 629da0b..763f560 100644
        }
      }
    }
+diff --git a/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/blockmanagement/DatanodeDescriptor.java b/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/blockmanagement/DatanodeDescriptor.java
+index 99def6b..10cf9ae 100644
+--- a/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/blockmanagement/DatanodeDescriptor.java
++++ b/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/blockmanagement/DatanodeDescriptor.java
+@@ -41,13 +41,16 @@
+ import org.apache.hadoop.hdfs.protocol.Block;
+ import org.apache.hadoop.hdfs.protocol.DatanodeID;
+ import org.apache.hadoop.hdfs.protocol.DatanodeInfo;
++import org.apache.hadoop.hdfs.protocol.ExtendedBlock;
+ import org.apache.hadoop.hdfs.server.namenode.CachedBlock;
++import org.apache.hadoop.hdfs.server.protocol.BlockECRecoveryCommand.BlockECRecoveryInfo;
+ import org.apache.hadoop.hdfs.server.protocol.BlockReportContext;
+ import org.apache.hadoop.hdfs.server.protocol.DatanodeStorage;
+ import org.apache.hadoop.hdfs.server.protocol.StorageReport;
+ import org.apache.hadoop.hdfs.server.protocol.VolumeFailureSummary;
+ import org.apache.hadoop.hdfs.util.EnumCounters;
+ import org.apache.hadoop.hdfs.util.LightWeightHashSet;
++import org.apache.hadoop.io.erasurecode.ECSchema;
+ import org.apache.hadoop.util.IntrusiveCollection;
+ import org.apache.hadoop.util.Time;
+ 
+@@ -218,7 +221,9 @@ public CachedBlocksList getPendingUncached() {
+   private long bandwidth;
+ 
+   /** A queue of blocks to be replicated by this datanode */
+-  private final BlockQueue<BlockTargetPair> replicateBlocks =
++  private final BlockQueue<BlockTargetPair> replicateBlocks = new BlockQueue<>();
++  /** A queue of blocks to be erasure coded by this datanode */
++  private final BlockQueue<BlockECRecoveryInfo> erasurecodeBlocks =
+       new BlockQueue<>();
+   /** A queue of blocks to be recovered by this datanode */
+   private final BlockQueue<BlockInfoUnderConstruction> recoverBlocks =
+@@ -377,6 +382,7 @@ public void clearBlockQueues() {
+       this.invalidateBlocks.clear();
+       this.recoverBlocks.clear();
+       this.replicateBlocks.clear();
++      this.erasurecodeBlocks.clear();
+     }
+     // pendingCached, cached, and pendingUncached are protected by the
+     // FSN lock.
+@@ -598,6 +604,20 @@ void addBlockToBeReplicated(Block block, DatanodeStorageInfo[] targets) {
+   }
+ 
+   /**
++   * Store block erasure coding work.
++   */
++  void addBlockToBeErasureCoded(ExtendedBlock block,
++      DatanodeDescriptor[] sources, DatanodeStorageInfo[] targets,
++      short[] liveBlockIndices, ECSchema ecSchema, int cellSize) {
++    assert (block != null && sources != null && sources.length > 0);
++    BlockECRecoveryInfo task = new BlockECRecoveryInfo(block, sources, targets,
++        liveBlockIndices, ecSchema, cellSize);
++    erasurecodeBlocks.offer(task);
++    BlockManager.LOG.debug("Adding block recovery task " + task + "to "
++        + getName() + ", current queue size is " + erasurecodeBlocks.size());
++  }
++
++  /**
+    * Store block recovery work.
+    */
+   void addBlockToBeRecovered(BlockInfoUnderConstruction block) {
+@@ -629,6 +649,14 @@ int getNumberOfBlocksToBeReplicated() {
+   }
+ 
+   /**
++   * The number of work items that are pending to be replicated
++   */
++  @VisibleForTesting
++  public int getNumberOfBlocksToBeErasureCoded() {
++    return erasurecodeBlocks.size();
++  }
++  
++  /**
+    * The number of block invalidation items that are pending to 
+    * be sent to the datanode
+    */
+@@ -642,6 +670,10 @@ int getNumberOfBlocksToBeInvalidated() {
+     return replicateBlocks.poll(maxTransfers);
+   }
+ 
++  public List<BlockECRecoveryInfo> getErasureCodeCommand(int maxTransfers) {
++    return erasurecodeBlocks.poll(maxTransfers);
++  }
++
+   public BlockInfoUnderConstruction[] getLeaseRecoveryCommand(
+       int maxTransfers) {
+     List<BlockInfoUnderConstruction> blocks = recoverBlocks.poll(maxTransfers);
+@@ -843,6 +875,10 @@ public String dumpDatanode() {
+     if (repl > 0) {
+       sb.append(" ").append(repl).append(" blocks to be replicated;");
+     }
++    int ec = erasurecodeBlocks.size();
++    if(ec > 0) {
++      sb.append(" ").append(ec).append(" blocks to be erasure coded;");
++    }
+     int inval = invalidateBlocks.size();
+     if (inval > 0) {
+       sb.append(" ").append(inval).append(" blocks to be invalidated;");      
+diff --git a/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/blockmanagement/DatanodeManager.java b/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/blockmanagement/DatanodeManager.java
+index 4266004..0a2f15b 100644
+--- a/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/blockmanagement/DatanodeManager.java
++++ b/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/blockmanagement/DatanodeManager.java
+@@ -39,6 +39,7 @@
+ import org.apache.hadoop.hdfs.server.namenode.NameNode;
+ import org.apache.hadoop.hdfs.server.namenode.Namesystem;
+ import org.apache.hadoop.hdfs.server.protocol.*;
++import org.apache.hadoop.hdfs.server.protocol.BlockECRecoveryCommand.BlockECRecoveryInfo;
+ import org.apache.hadoop.hdfs.server.protocol.BlockRecoveryCommand.RecoveringBlock;
+ import org.apache.hadoop.ipc.Server;
+ import org.apache.hadoop.net.*;
+@@ -1439,6 +1440,13 @@ private void setDatanodeDead(DatanodeDescriptor node) {
+           cmds.add(new BlockCommand(DatanodeProtocol.DNA_TRANSFER, blockPoolId,
+               pendingList));
+         }
++        // checking pending erasure coding tasks
++        List<BlockECRecoveryInfo> pendingECList =
++            nodeinfo.getErasureCodeCommand(maxTransfers);
++        if (pendingECList != null) {
++          cmds.add(new BlockECRecoveryCommand(DatanodeProtocol.DNA_ERASURE_CODING_RECOVERY,
++              pendingECList));
++        }
+         //check block invalidation
+         Block[] blks = nodeinfo.getInvalidateBlocks(blockInvalidateLimit);
+         if (blks != null) {

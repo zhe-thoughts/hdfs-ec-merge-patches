@@ -502,3 +502,168 @@ index 0b60a97..170a357 100644
    public BlockInfo addBlockCollection(BlockInfo block,
        BlockCollection bc) {
      return blocksMap.addBlockCollection(block, bc);
+diff --git a/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/blockmanagement/BlocksMap.java b/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/blockmanagement/BlocksMap.java
+index 0dbf485..00cea53 100644
+--- a/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/blockmanagement/BlocksMap.java
++++ b/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/blockmanagement/BlocksMap.java
+@@ -43,8 +43,15 @@
+ 
+     @Override
+     public boolean hasNext() {
+-      return blockInfo != null && nextIdx < blockInfo.getCapacity()
+-              && blockInfo.getDatanode(nextIdx) != null;
++      if (blockInfo == null) {
++        return false;
++      }
++      while (nextIdx < blockInfo.getCapacity() &&
++          blockInfo.getDatanode(nextIdx) == null) {
++        // note that for striped blocks there may be null in the triplets
++        nextIdx++;
++      }
++      return nextIdx < blockInfo.getCapacity();
+     }
+ 
+     @Override
+@@ -123,9 +130,13 @@ void removeBlock(Block block) {
+       return;
+ 
+     blockInfo.setBlockCollection(null);
+-    for(int idx = blockInfo.numNodes()-1; idx >= 0; idx--) {
++    final int size = blockInfo.isStriped()?
++        blockInfo.getCapacity() : blockInfo.numNodes();
++    for(int idx = size - 1; idx >= 0; idx--) {
+       DatanodeDescriptor dn = blockInfo.getDatanode(idx);
+-      dn.removeBlock(blockInfo); // remove from the list and wipe the location
++      if (dn != null) {
++        dn.removeBlock(blockInfo); // remove from the list and wipe the location
++      }
+     }
+   }
+   
+diff --git a/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/blockmanagement/SequentialBlockGroupIdGenerator.java b/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/blockmanagement/SequentialBlockGroupIdGenerator.java
+new file mode 100644
+index 0000000..479ee4c
+--- /dev/null
++++ b/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/blockmanagement/SequentialBlockGroupIdGenerator.java
+@@ -0,0 +1,85 @@
++/**
++ * Licensed to the Apache Software Foundation (ASF) under one
++ * or more contributor license agreements.  See the NOTICE file
++ * distributed with this work for additional information
++ * regarding copyright ownership.  The ASF licenses this file
++ * to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance
++ * with the License.  You may obtain a copy of the License at
++ *
++ *     http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package org.apache.hadoop.hdfs.server.blockmanagement;
++
++import org.apache.hadoop.classification.InterfaceAudience;
++import org.apache.hadoop.hdfs.protocol.Block;
++import org.apache.hadoop.util.SequentialNumber;
++
++import static org.apache.hadoop.hdfs.server.common.HdfsServerConstants.BLOCK_GROUP_INDEX_MASK;
++import static org.apache.hadoop.hdfs.server.common.HdfsServerConstants.MAX_BLOCKS_IN_GROUP;
++
++/**
++ * Generate the next valid block group ID by incrementing the maximum block
++ * group ID allocated so far, with the first 2^10 block group IDs reserved.
++ * HDFS-EC introduces a hierarchical protocol to name blocks and groups:
++ * Contiguous: {reserved block IDs | flag | block ID}
++ * Striped: {reserved block IDs | flag | block group ID | index in group}
++ *
++ * Following n bits of reserved block IDs, The (n+1)th bit in an ID
++ * distinguishes contiguous (0) and striped (1) blocks. For a striped block,
++ * bits (n+2) to (64-m) represent the ID of its block group, while the last m
++ * bits represent its index of the group. The value m is determined by the
++ * maximum number of blocks in a group (MAX_BLOCKS_IN_GROUP).
++ *
++ * Note that the {@link #nextValue()} methods requires external lock to
++ * guarantee IDs have no conflicts.
++ */
++@InterfaceAudience.Private
++public class SequentialBlockGroupIdGenerator extends SequentialNumber {
++
++  private final BlockManager blockManager;
++
++  SequentialBlockGroupIdGenerator(BlockManager blockManagerRef) {
++    super(Long.MIN_VALUE);
++    this.blockManager = blockManagerRef;
++  }
++
++  @Override // NumberGenerator
++  public long nextValue() {
++    skipTo((getCurrentValue() & ~BLOCK_GROUP_INDEX_MASK) + MAX_BLOCKS_IN_GROUP);
++    // Make sure there's no conflict with existing random block IDs
++    final Block b = new Block(getCurrentValue());
++    while (hasValidBlockInRange(b)) {
++      skipTo(getCurrentValue() + MAX_BLOCKS_IN_GROUP);
++      b.setBlockId(getCurrentValue());
++    }
++    if (b.getBlockId() >= 0) {
++      throw new IllegalStateException("All negative block group IDs are used, "
++          + "growing into positive IDs, "
++          + "which might conflict with non-erasure coded blocks.");
++    }
++    return getCurrentValue();
++  }
++
++  /**
++   * @param b A block object whose id is set to the starting point for check
++   * @return true if any ID in the range
++   *      {id, id+HdfsConstants.MAX_BLOCKS_IN_GROUP} is pointed-to by a file
++   */
++  private boolean hasValidBlockInRange(Block b) {
++    final long id = b.getBlockId();
++    for (int i = 0; i < MAX_BLOCKS_IN_GROUP; i++) {
++      b.setBlockId(id + i);
++      if (blockManager.getBlockCollection(b) != null) {
++        return true;
++      }
++    }
++    return false;
++  }
++}
+diff --git a/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/blockmanagement/SequentialBlockIdGenerator.java b/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/blockmanagement/SequentialBlockIdGenerator.java
+index eef8857..6074784 100644
+--- a/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/blockmanagement/SequentialBlockIdGenerator.java
++++ b/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/blockmanagement/SequentialBlockIdGenerator.java
+@@ -19,7 +19,6 @@
+ 
+ import org.apache.hadoop.classification.InterfaceAudience;
+ import org.apache.hadoop.hdfs.protocol.Block;
+-import org.apache.hadoop.hdfs.server.blockmanagement.BlockManager;
+ import org.apache.hadoop.util.SequentialNumber;
+ 
+ /**
+@@ -54,6 +53,11 @@ public long nextValue() {
+     while(isValidBlock(b)) {
+       b.setBlockId(super.nextValue());
+     }
++    if (b.getBlockId() < 0) {
++      throw new IllegalStateException("All positive block IDs are used, " +
++          "wrapping to negative IDs, " +
++          "which might conflict with erasure coded block groups.");
++    }
+     return b.getBlockId();
+   }
+ 
+diff --git a/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/common/HdfsServerConstants.java b/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/common/HdfsServerConstants.java
+index 250fca5..4043928 100644
+--- a/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/common/HdfsServerConstants.java
++++ b/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/common/HdfsServerConstants.java
+@@ -398,4 +398,7 @@ public void write(DataOutput out) throws IOException {
+       "security.hdfs.unreadable.by.superuser";
+   String XATTR_ERASURECODING_ZONE =
+       "raw.hdfs.erasurecoding.zone";
++
++  long BLOCK_GROUP_INDEX_MASK = 15;
++  byte MAX_BLOCKS_IN_GROUP = 16;
+ }
