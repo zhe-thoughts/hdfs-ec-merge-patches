@@ -1,0 +1,78 @@
+diff --git a/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/BlockReader.java b/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/BlockReader.java
+index aa3e8ba..0a5511e 100644
+--- a/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/BlockReader.java
++++ b/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/BlockReader.java
+@@ -24,6 +24,7 @@
+ import org.apache.hadoop.fs.ByteBufferReadable;
+ import org.apache.hadoop.fs.ReadOption;
+ import org.apache.hadoop.hdfs.shortcircuit.ClientMmap;
++import org.apache.hadoop.util.DataChecksum;
+ 
+ /**
+  * A BlockReader is responsible for reading a single block
+@@ -99,4 +100,9 @@
+    *                      supported.
+    */
+   ClientMmap getClientMmap(EnumSet<ReadOption> opts);
++
++  /**
++   * @return              The DataChecksum used by the read block
++   */
++  DataChecksum getDataChecksum();
+ }
+diff --git a/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/BlockReaderLocal.java b/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/BlockReaderLocal.java
+index d913f3a..0b2420d 100644
+--- a/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/BlockReaderLocal.java
++++ b/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/BlockReaderLocal.java
+@@ -738,4 +738,9 @@ void forceAnchorable() {
+   void forceUnanchorable() {
+     replica.getSlot().makeUnanchorable();
+   }
++
++  @Override
++  public DataChecksum getDataChecksum() {
++    return checksum;
++  }
+ }
+diff --git a/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/BlockReaderLocalLegacy.java b/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/BlockReaderLocalLegacy.java
+index c16ffdf..04cf733 100644
+--- a/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/BlockReaderLocalLegacy.java
++++ b/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/BlockReaderLocalLegacy.java
+@@ -732,4 +732,9 @@ public boolean isShortCircuit() {
+   public ClientMmap getClientMmap(EnumSet<ReadOption> opts) {
+     return null;
+   }
++
++  @Override
++  public DataChecksum getDataChecksum() {
++    return checksum;
++  }
+ }
+diff --git a/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/RemoteBlockReader.java b/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/RemoteBlockReader.java
+index d70f419..70cce7e 100644
+--- a/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/RemoteBlockReader.java
++++ b/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/RemoteBlockReader.java
+@@ -505,4 +505,9 @@ public boolean isShortCircuit() {
+   public ClientMmap getClientMmap(EnumSet<ReadOption> opts) {
+     return null;
+   }
++
++  @Override
++  public DataChecksum getDataChecksum() {
++    return checksum;
++  }
+ }
+diff --git a/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/RemoteBlockReader2.java b/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/RemoteBlockReader2.java
+index c368d65..cce44b7 100644
+--- a/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/RemoteBlockReader2.java
++++ b/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/RemoteBlockReader2.java
+@@ -474,4 +474,9 @@ public boolean isShortCircuit() {
+   public ClientMmap getClientMmap(EnumSet<ReadOption> opts) {
+     return null;
+   }
++
++  @Override
++  public DataChecksum getDataChecksum() {
++    return checksum;
++  }
+ }

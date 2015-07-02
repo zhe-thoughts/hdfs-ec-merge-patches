@@ -1,0 +1,756 @@
+diff --git a/hadoop-hdfs-project/hadoop-hdfs-client/src/main/java/org/apache/hadoop/hdfs/protocol/ClientProtocol.java b/hadoop-hdfs-project/hadoop-hdfs-client/src/main/java/org/apache/hadoop/hdfs/protocol/ClientProtocol.java
+index ab41911..74a67af 100644
+--- a/hadoop-hdfs-project/hadoop-hdfs-client/src/main/java/org/apache/hadoop/hdfs/protocol/ClientProtocol.java
++++ b/hadoop-hdfs-project/hadoop-hdfs-client/src/main/java/org/apache/hadoop/hdfs/protocol/ClientProtocol.java
+@@ -53,6 +53,7 @@
+ import org.apache.hadoop.hdfs.server.protocol.DatanodeStorageReport;
+ import org.apache.hadoop.io.EnumSetWritable;
+ import org.apache.hadoop.io.Text;
++import org.apache.hadoop.io.erasurecode.ECSchema;
+ import org.apache.hadoop.io.retry.AtMostOnce;
+ import org.apache.hadoop.io.retry.Idempotent;
+ import org.apache.hadoop.security.AccessControlException;
+@@ -1457,4 +1458,30 @@ public void setXAttr(String src, XAttr xAttr, EnumSet<XAttrSetFlag> flag)
+    */
+   @Idempotent
+   public EventBatchList getEditsFromTxid(long txid) throws IOException;
++
++  /**
++   * Create an erasure coding zone with specified schema, if any, otherwise
++   * default
++   */
++  @AtMostOnce
++  public void createErasureCodingZone(String src, ECSchema schema, int cellSize)
++      throws IOException;
++
++  /**
++   * Gets list of ECSchemas loaded in Namenode
++   *
++   * @return Returns the list of ECSchemas loaded at Namenode
++   * @throws IOException
++   */
++  @Idempotent
++  public ECSchema[] getECSchemas() throws IOException;
++
++  /**
++   * Get the information about the EC zone for the path
++   *
++   * @param src path to get the info for
++   * @throws IOException
++   */
++  @Idempotent
++  public ErasureCodingZone getErasureCodingZone(String src) throws IOException;
+ }
+diff --git a/hadoop-hdfs-project/hadoop-hdfs-client/src/main/java/org/apache/hadoop/hdfs/protocol/HdfsConstants.java b/hadoop-hdfs-project/hadoop-hdfs-client/src/main/java/org/apache/hadoop/hdfs/protocol/HdfsConstants.java
+index 58c7ea1..a527e23 100644
+--- a/hadoop-hdfs-project/hadoop-hdfs-client/src/main/java/org/apache/hadoop/hdfs/protocol/HdfsConstants.java
++++ b/hadoop-hdfs-project/hadoop-hdfs-client/src/main/java/org/apache/hadoop/hdfs/protocol/HdfsConstants.java
+@@ -75,6 +75,17 @@
+   public static final String CLIENT_NAMENODE_PROTOCOL_NAME =
+       "org.apache.hadoop.hdfs.protocol.ClientProtocol";
+ 
++  /*
++   * These values correspond to the values used by the system default erasure
++   * coding schema.
++   * TODO: to be removed once all places use schema.
++   */
++
++  public static final byte NUM_DATA_BLOCKS = 6;
++  public static final byte NUM_PARITY_BLOCKS = 3;
++  // The chunk size for striped block which is used by erasure coding
++  public static final int BLOCK_STRIPED_CELL_SIZE = 64 * 1024;
++
+   // SafeMode actions
+   public enum SafeModeAction {
+     SAFEMODE_LEAVE, SAFEMODE_ENTER, SAFEMODE_GET
+diff --git a/hadoop-hdfs-project/hadoop-hdfs-client/src/main/java/org/apache/hadoop/hdfs/protocol/HdfsFileStatus.java b/hadoop-hdfs-project/hadoop-hdfs-client/src/main/java/org/apache/hadoop/hdfs/protocol/HdfsFileStatus.java
+index 34f429a..b91336e 100644
+--- a/hadoop-hdfs-project/hadoop-hdfs-client/src/main/java/org/apache/hadoop/hdfs/protocol/HdfsFileStatus.java
++++ b/hadoop-hdfs-project/hadoop-hdfs-client/src/main/java/org/apache/hadoop/hdfs/protocol/HdfsFileStatus.java
+@@ -26,6 +26,7 @@
+ import org.apache.hadoop.fs.Path;
+ import org.apache.hadoop.fs.permission.FsPermission;
+ import org.apache.hadoop.hdfs.DFSUtilClient;
++import org.apache.hadoop.io.erasurecode.ECSchema;
+ 
+ /** Interface that represents the over the wire information for a file.
+  */
+@@ -48,6 +49,9 @@
+ 
+   private final FileEncryptionInfo feInfo;
+ 
++  private final ECSchema ecSchema;
++  private final int stripeCellSize;
++
+   // Used by dir, not including dot and dotdot. Always zero for a regular file.
+   private final int childrenNum;
+   private final byte storagePolicy;
+@@ -73,7 +77,7 @@ public HdfsFileStatus(long length, boolean isdir, int block_replication,
+       long blocksize, long modification_time, long access_time,
+       FsPermission permission, String owner, String group, byte[] symlink,
+       byte[] path, long fileId, int childrenNum, FileEncryptionInfo feInfo,
+-      byte storagePolicy) {
++      byte storagePolicy, ECSchema ecSchema, int stripeCellSize) {
+     this.length = length;
+     this.isdir = isdir;
+     this.block_replication = (short)block_replication;
+@@ -93,6 +97,8 @@ public HdfsFileStatus(long length, boolean isdir, int block_replication,
+     this.childrenNum = childrenNum;
+     this.feInfo = feInfo;
+     this.storagePolicy = storagePolicy;
++    this.ecSchema = ecSchema;
++    this.stripeCellSize = stripeCellSize;
+   }
+ 
+   /**
+@@ -250,6 +256,14 @@ public final FileEncryptionInfo getFileEncryptionInfo() {
+     return feInfo;
+   }
+ 
++  public ECSchema getECSchema() {
++    return ecSchema;
++  }
++
++  public int getStripeCellSize() {
++    return stripeCellSize;
++  }
++
+   public final int getChildrenNum() {
+     return childrenNum;
+   }
+diff --git a/hadoop-hdfs-project/hadoop-hdfs-client/src/main/java/org/apache/hadoop/hdfs/protocol/SnapshottableDirectoryStatus.java b/hadoop-hdfs-project/hadoop-hdfs-client/src/main/java/org/apache/hadoop/hdfs/protocol/SnapshottableDirectoryStatus.java
+index ac19d44..a6c7b10 100644
+--- a/hadoop-hdfs-project/hadoop-hdfs-client/src/main/java/org/apache/hadoop/hdfs/protocol/SnapshottableDirectoryStatus.java
++++ b/hadoop-hdfs-project/hadoop-hdfs-client/src/main/java/org/apache/hadoop/hdfs/protocol/SnapshottableDirectoryStatus.java
+@@ -61,7 +61,7 @@ public SnapshottableDirectoryStatus(long modification_time, long access_time,
+       int snapshotNumber, int snapshotQuota, byte[] parentFullPath) {
+     this.dirStatus = new HdfsFileStatus(0, true, 0, 0, modification_time,
+         access_time, permission, owner, group, null, localName, inodeId,
+-        childrenNum, null, HdfsConstants.BLOCK_STORAGE_POLICY_ID_UNSPECIFIED);
++        childrenNum, null, HdfsConstants.BLOCK_STORAGE_POLICY_ID_UNSPECIFIED, null, 0);
+     this.snapshotNumber = snapshotNumber;
+     this.snapshotQuota = snapshotQuota;
+     this.parentFullPath = parentFullPath;
+diff --git a/hadoop-hdfs-project/hadoop-hdfs-client/src/main/java/org/apache/hadoop/hdfs/web/JsonUtilClient.java b/hadoop-hdfs-project/hadoop-hdfs-client/src/main/java/org/apache/hadoop/hdfs/web/JsonUtilClient.java
+index e025e31..016bb8b 100644
+--- a/hadoop-hdfs-project/hadoop-hdfs-client/src/main/java/org/apache/hadoop/hdfs/web/JsonUtilClient.java
++++ b/hadoop-hdfs-project/hadoop-hdfs-client/src/main/java/org/apache/hadoop/hdfs/web/JsonUtilClient.java
+@@ -132,7 +132,7 @@ static HdfsFileStatus toFileStatus(final Map<?, ?> json, boolean includesType) {
+         blockSize, mTime, aTime, permission, owner, group,
+         symlink, DFSUtilClient.string2Bytes(localName),
+         fileId, childrenNum, null,
+-        storagePolicy);
++        storagePolicy, null, 0);
+   }
+ 
+   /** Convert a Json map to an ExtendedBlock object. */
+@@ -489,7 +489,7 @@ static LocatedBlocks toLocatedBlocks(
+         (Map<?, ?>) m.get("lastLocatedBlock"));
+     final boolean isLastBlockComplete = (Boolean)m.get("isLastBlockComplete");
+     return new LocatedBlocks(fileLength, isUnderConstruction, locatedBlocks,
+-        lastLocatedBlock, isLastBlockComplete, null);
++        lastLocatedBlock, isLastBlockComplete, null, null, 0);
+   }
+ 
+ }
+diff --git a/hadoop-hdfs-project/hadoop-hdfs/pom.xml b/hadoop-hdfs-project/hadoop-hdfs/pom.xml
+index f90644c..090923a 100644
+--- a/hadoop-hdfs-project/hadoop-hdfs/pom.xml
++++ b/hadoop-hdfs-project/hadoop-hdfs/pom.xml
+@@ -348,6 +348,7 @@ http://maven.apache.org/xsd/maven-4.0.0.xsd">
+                   <include>hdfs.proto</include>
+                   <include>encryption.proto</include>
+                   <include>inotify.proto</include>
++                  <include>erasurecoding.proto</include>
+                 </includes>
+               </source>
+               <output>${project.build.directory}/generated-sources/java</output>
+diff --git a/hadoop-hdfs-project/hadoop-hdfs/src/main/bin/hdfs b/hadoop-hdfs-project/hadoop-hdfs/src/main/bin/hdfs
+index 2e09cef..dd4d71e 100755
+--- a/hadoop-hdfs-project/hadoop-hdfs/src/main/bin/hdfs
++++ b/hadoop-hdfs-project/hadoop-hdfs/src/main/bin/hdfs
+@@ -29,6 +29,7 @@ function hadoop_usage
+   echo "  debug                run a Debug Admin to execute HDFS debug commands"
+   echo "  dfs                  run a filesystem command on the file system"
+   echo "  dfsadmin             run a DFS admin client"
++  echo "  erasurecode          configure HDFS erasure coding zones"
+   echo "  fetchdt              fetch a delegation token from the NameNode"
+   echo "  fsck                 run a DFS filesystem checking utility"
+   echo "  getconf              get config values from configuration"
+@@ -135,6 +136,11 @@ case ${COMMAND} in
+     hadoop_debug "Appending HADOOP_CLIENT_OPTS onto HADOOP_OPTS"
+     HADOOP_OPTS="${HADOOP_OPTS} ${HADOOP_CLIENT_OPTS}"
+   ;;
++  erasurecode)
++    CLASS=org.apache.hadoop.hdfs.tools.erasurecode.ECCli
++    hadoop_debug "Appending HADOOP_CLIENT_OPTS onto HADOOP_OPTS"
++    HADOOP_OPTS="${HADOOP_OPTS} ${HADOOP_CLIENT_OPTS}"
++  ;;
+   fetchdt)
+     CLASS=org.apache.hadoop.hdfs.tools.DelegationTokenFetcher
+   ;;
+diff --git a/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/DFSClient.java b/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/DFSClient.java
+index 4923a50..2913c9b 100644
+--- a/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/DFSClient.java
++++ b/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/DFSClient.java
+@@ -118,6 +118,7 @@
+ import org.apache.hadoop.hdfs.protocol.DatanodeID;
+ import org.apache.hadoop.hdfs.protocol.DatanodeInfo;
+ import org.apache.hadoop.hdfs.protocol.DirectoryListing;
++import org.apache.hadoop.hdfs.protocol.ErasureCodingZone;
+ import org.apache.hadoop.hdfs.protocol.EncryptionZone;
+ import org.apache.hadoop.hdfs.protocol.EncryptionZoneIterator;
+ import org.apache.hadoop.hdfs.protocol.ExtendedBlock;
+@@ -163,6 +164,7 @@
+ import org.apache.hadoop.io.IOUtils;
+ import org.apache.hadoop.io.MD5Hash;
+ import org.apache.hadoop.io.Text;
++import org.apache.hadoop.io.erasurecode.ECSchema;
+ import org.apache.hadoop.io.retry.LossyRetryInvocationHandler;
+ import org.apache.hadoop.ipc.RPC;
+ import org.apache.hadoop.ipc.RemoteException;
+@@ -3243,4 +3245,51 @@ TraceScope getSrcDstTraceScope(String description, String src, String dst) {
+     }
+     return scope;
+   }
++
++  public ECSchema[] getECSchemas() throws IOException {
++    checkOpen();
++    TraceScope scope = Trace.startSpan("getECSchemas", traceSampler);
++    try {
++      return namenode.getECSchemas();
++    } finally {
++      scope.close();
++    }
++  }
++
++  /**
++   * Get the erasure coding zone information for the specified path
++   *
++   * @param src path to get the information for
++   * @return Returns the zone information if path is in EC Zone, null otherwise
++   * @throws IOException
++   */
++  public ErasureCodingZone getErasureCodingZone(String src) throws IOException {
++    checkOpen();
++    TraceScope scope = getPathTraceScope("getErasureCodingZone", src);
++    try {
++      return namenode.getErasureCodingZone(src);
++    } catch (RemoteException re) {
++      throw re.unwrapRemoteException(FileNotFoundException.class,
++          AccessControlException.class, UnresolvedPathException.class);
++    } finally {
++      scope.close();
++    }
++  }
++
++  public void createErasureCodingZone(String src, ECSchema schema, int cellSize)
++      throws IOException {
++    checkOpen();
++    TraceScope scope = getPathTraceScope("createErasureCodingZone", src);
++    try {
++      namenode.createErasureCodingZone(src, schema, cellSize);
++    } catch (RemoteException re) {
++      throw re.unwrapRemoteException(AccessControlException.class,
++          SafeModeException.class,
++          UnresolvedPathException.class);
++    } finally {
++      scope.close();
++    }
++  }
++
++
+ }
+diff --git a/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/DistributedFileSystem.java b/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/DistributedFileSystem.java
+index 902636c..2c140b5 100644
+--- a/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/DistributedFileSystem.java
++++ b/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/DistributedFileSystem.java
+@@ -75,6 +75,7 @@
+ import org.apache.hadoop.hdfs.protocol.ClientProtocol;
+ import org.apache.hadoop.hdfs.protocol.DatanodeInfo;
+ import org.apache.hadoop.hdfs.protocol.DirectoryListing;
++import org.apache.hadoop.hdfs.protocol.ErasureCodingZone;
+ import org.apache.hadoop.hdfs.protocol.EncryptionZone;
+ import org.apache.hadoop.hdfs.protocol.HdfsConstants;
+ import org.apache.hadoop.hdfs.protocol.HdfsConstants.DatanodeReportType;
+@@ -89,6 +90,7 @@
+ import org.apache.hadoop.hdfs.security.token.delegation.DelegationTokenIdentifier;
+ import org.apache.hadoop.hdfs.server.namenode.NameNode;
+ import org.apache.hadoop.io.Text;
++import org.apache.hadoop.io.erasurecode.ECSchema;
+ import org.apache.hadoop.net.NetUtils;
+ import org.apache.hadoop.security.AccessControlException;
+ import org.apache.hadoop.security.Credentials;
+@@ -2273,4 +2275,68 @@ public DFSInotifyEventInputStream getInotifyEventStream(long lastReadTxid)
+       throws IOException {
+     return dfs.getInotifyEventStream(lastReadTxid);
+   }
++
++  /**
++   * Create the erasurecoding zone
++   *
++   * @param path Directory to create the ec zone
++   * @param schema ECSchema for the zone. If not specified default will be used.
++   * @param cellSize Cellsize for the striped erasure coding
++   * @throws IOException
++   */
++  public void createErasureCodingZone(final Path path, final ECSchema schema,
++      final int cellSize) throws IOException {
++    Path absF = fixRelativePart(path);
++    new FileSystemLinkResolver<Void>() {
++      @Override
++      public Void doCall(final Path p) throws IOException,
++          UnresolvedLinkException {
++        dfs.createErasureCodingZone(getPathName(p), schema, cellSize);
++        return null;
++      }
++
++      @Override
++      public Void next(final FileSystem fs, final Path p) throws IOException {
++        if (fs instanceof DistributedFileSystem) {
++          DistributedFileSystem myDfs = (DistributedFileSystem) fs;
++          myDfs.createErasureCodingZone(p, schema, cellSize);
++          return null;
++        }
++        throw new UnsupportedOperationException(
++            "Cannot createErasureCodingZone through a symlink to a "
++                + "non-DistributedFileSystem: " + path + " -> " + p);
++      }
++    }.resolve(this, absF);
++  }
++
++  /**
++   * Get ErasureCoding zone information for the specified path
++   *
++   * @param path
++   * @return Returns the zone information if path is in EC zone, null otherwise
++   * @throws IOException
++   */
++  public ErasureCodingZone getErasureCodingZone(final Path path)
++      throws IOException {
++    Path absF = fixRelativePart(path);
++    return new FileSystemLinkResolver<ErasureCodingZone>() {
++      @Override
++      public ErasureCodingZone doCall(final Path p) throws IOException,
++          UnresolvedLinkException {
++        return dfs.getErasureCodingZone(getPathName(p));
++      }
++
++      @Override
++      public ErasureCodingZone next(final FileSystem fs, final Path p)
++          throws IOException {
++        if (fs instanceof DistributedFileSystem) {
++          DistributedFileSystem myDfs = (DistributedFileSystem) fs;
++          return myDfs.getErasureCodingZone(p);
++        }
++        throw new UnsupportedOperationException(
++            "Cannot getErasureCodingZone through a symlink to a "
++                + "non-DistributedFileSystem: " + path + " -> " + p);
++      }
++    }.resolve(this, absF);
++  }
+ }
+diff --git a/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/client/HdfsAdmin.java b/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/client/HdfsAdmin.java
+index 84499bb..5a3c885 100644
+--- a/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/client/HdfsAdmin.java
++++ b/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/client/HdfsAdmin.java
+@@ -37,9 +37,11 @@
+ import org.apache.hadoop.hdfs.protocol.CachePoolEntry;
+ import org.apache.hadoop.hdfs.protocol.CachePoolInfo;
+ import org.apache.hadoop.hdfs.protocol.EncryptionZone;
++import org.apache.hadoop.hdfs.protocol.ErasureCodingZone;
+ import org.apache.hadoop.hdfs.protocol.HdfsConstants;
+ import org.apache.hadoop.security.AccessControlException;
+ import org.apache.hadoop.hdfs.tools.DFSAdmin;
++import org.apache.hadoop.io.erasurecode.ECSchema;
+ 
+ /**
+  * The public API for performing administrative functions on HDFS. Those writing
+@@ -363,4 +365,42 @@ public void setStoragePolicy(final Path src, final String policyName)
+       throws IOException {
+     dfs.setStoragePolicy(src, policyName);
+   }
++
++  /**
++   * Create the ErasureCoding zone
++   *
++   * @param path
++   *          Directory to create the ErasureCoding zone
++   * @param schema
++   *          ECSchema for the zone. If not specified default will be used.
++   * @param cellSize
++   *          Cellsize for the striped ErasureCoding
++   * @throws IOException
++   */
++  public void createErasureCodingZone(final Path path, final ECSchema schema,
++      final int cellSize) throws IOException {
++    dfs.createErasureCodingZone(path, schema, cellSize);
++  }
++
++  /**
++   * Get the ErasureCoding zone information for the specified path
++   *
++   * @param path
++   * @return Returns the zone information if path is in EC zone, null otherwise
++   * @throws IOException
++   */
++  public ErasureCodingZone getErasureCodingZone(final Path path)
++      throws IOException {
++    return dfs.getErasureCodingZone(path);
++  }
++
++  /**
++   * Get the ErasureCoding schemas supported.
++   *
++   * @return ECSchemas
++   * @throws IOException
++   */
++  public ECSchema[] getECSchemas() throws IOException {
++    return dfs.getClient().getECSchemas();
++  }
+ }
+diff --git a/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/protocol/HdfsLocatedFileStatus.java b/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/protocol/HdfsLocatedFileStatus.java
+index 23e8f57..4701538 100644
+--- a/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/protocol/HdfsLocatedFileStatus.java
++++ b/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/protocol/HdfsLocatedFileStatus.java
+@@ -26,6 +26,7 @@
+ import org.apache.hadoop.fs.Path;
+ import org.apache.hadoop.fs.permission.FsPermission;
+ import org.apache.hadoop.hdfs.DFSUtilClient;
++import org.apache.hadoop.io.erasurecode.ECSchema;
+ 
+ /** 
+  * Interface that represents the over the wire information
+@@ -58,10 +59,11 @@ public HdfsLocatedFileStatus(long length, boolean isdir,
+       int block_replication, long blocksize, long modification_time,
+       long access_time, FsPermission permission, String owner, String group,
+       byte[] symlink, byte[] path, long fileId, LocatedBlocks locations,
+-      int childrenNum, FileEncryptionInfo feInfo, byte storagePolicy) {
++      int childrenNum, FileEncryptionInfo feInfo, byte storagePolicy,
++      ECSchema schema, int stripeCellSize) {
+     super(length, isdir, block_replication, blocksize, modification_time,
+         access_time, permission, owner, group, symlink, path, fileId,
+-        childrenNum, feInfo, storagePolicy);
++        childrenNum, feInfo, storagePolicy, schema, stripeCellSize);
+     this.locations = locations;
+   }
+ 
+diff --git a/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/protocolPB/ClientNamenodeProtocolServerSideTranslatorPB.java b/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/protocolPB/ClientNamenodeProtocolServerSideTranslatorPB.java
+index 480b3d9..3d36cb1 100644
+--- a/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/protocolPB/ClientNamenodeProtocolServerSideTranslatorPB.java
++++ b/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/protocolPB/ClientNamenodeProtocolServerSideTranslatorPB.java
+@@ -35,6 +35,7 @@
+ import org.apache.hadoop.hdfs.protocol.ClientProtocol;
+ import org.apache.hadoop.hdfs.protocol.CorruptFileBlocks;
+ import org.apache.hadoop.hdfs.protocol.DirectoryListing;
++import org.apache.hadoop.hdfs.protocol.ErasureCodingZone;
+ import org.apache.hadoop.hdfs.protocol.EncryptionZone;
+ import org.apache.hadoop.hdfs.protocol.HdfsConstants;
+ import org.apache.hadoop.hdfs.protocol.HdfsFileStatus;
+@@ -198,6 +199,12 @@
+ import org.apache.hadoop.hdfs.protocol.proto.EncryptionZonesProtos.GetEZForPathRequestProto;
+ import org.apache.hadoop.hdfs.protocol.proto.EncryptionZonesProtos.ListEncryptionZonesResponseProto;
+ import org.apache.hadoop.hdfs.protocol.proto.EncryptionZonesProtos.ListEncryptionZonesRequestProto;
++import org.apache.hadoop.hdfs.protocol.proto.ErasureCodingProtos.GetECSchemasRequestProto;
++import org.apache.hadoop.hdfs.protocol.proto.ErasureCodingProtos.GetECSchemasResponseProto;
++import org.apache.hadoop.hdfs.protocol.proto.ErasureCodingProtos.GetErasureCodingZoneRequestProto;
++import org.apache.hadoop.hdfs.protocol.proto.ErasureCodingProtos.GetErasureCodingZoneResponseProto;
++import org.apache.hadoop.hdfs.protocol.proto.ErasureCodingProtos.CreateErasureCodingZoneRequestProto;
++import org.apache.hadoop.hdfs.protocol.proto.ErasureCodingProtos.CreateErasureCodingZoneResponseProto;
+ import org.apache.hadoop.hdfs.protocol.proto.HdfsProtos.DatanodeIDProto;
+ import org.apache.hadoop.hdfs.protocol.proto.HdfsProtos.DatanodeInfoProto;
+ import org.apache.hadoop.hdfs.protocol.proto.HdfsProtos.LocatedBlockProto;
+@@ -213,6 +220,7 @@
+ import org.apache.hadoop.hdfs.security.token.delegation.DelegationTokenIdentifier;
+ import org.apache.hadoop.io.EnumSetWritable;
+ import org.apache.hadoop.io.Text;
++import org.apache.hadoop.io.erasurecode.ECSchema;
+ import org.apache.hadoop.security.proto.SecurityProtos.CancelDelegationTokenRequestProto;
+ import org.apache.hadoop.security.proto.SecurityProtos.CancelDelegationTokenResponseProto;
+ import org.apache.hadoop.security.proto.SecurityProtos.GetDelegationTokenRequestProto;
+@@ -1497,4 +1505,50 @@ public GetEditsFromTxidResponseProto getEditsFromTxid(RpcController controller,
+       throw new ServiceException(e);
+     }
+   }
++
++  @Override
++  public GetECSchemasResponseProto getECSchemas(RpcController controller,
++      GetECSchemasRequestProto request) throws ServiceException {
++    try {
++      ECSchema[] ecSchemas = server.getECSchemas();
++      GetECSchemasResponseProto.Builder resBuilder = GetECSchemasResponseProto
++          .newBuilder();
++      for (ECSchema ecSchema : ecSchemas) {
++        resBuilder.addSchemas(PBHelper.convertECSchema(ecSchema));
++      }
++      return resBuilder.build();
++    } catch (IOException e) {
++      throw new ServiceException(e);
++    }
++  }
++
++  @Override
++  public GetErasureCodingZoneResponseProto getErasureCodingZone(RpcController controller,
++      GetErasureCodingZoneRequestProto request) throws ServiceException {
++    try {
++      ErasureCodingZone ecZone = server.getErasureCodingZone(request.getSrc());
++      GetErasureCodingZoneResponseProto.Builder builder = GetErasureCodingZoneResponseProto.newBuilder();
++      if (ecZone != null) {
++        builder.setECZone(PBHelper.convertErasureCodingZone(ecZone));
++      }
++      return builder.build();
++    } catch (IOException e) {
++      throw new ServiceException(e);
++    }
++  }
++
++  @Override
++  public CreateErasureCodingZoneResponseProto createErasureCodingZone(
++      RpcController controller, CreateErasureCodingZoneRequestProto req)
++      throws ServiceException {
++    try {
++      ECSchema schema = req.hasSchema() ? PBHelper.convertECSchema(req
++          .getSchema()) : null;
++      int cellSize = req.hasCellSize() ? req.getCellSize() : 0;
++      server.createErasureCodingZone(req.getSrc(), schema, cellSize);
++      return CreateErasureCodingZoneResponseProto.newBuilder().build();
++    } catch (IOException e) {
++      throw new ServiceException(e);
++    }
++  }
+ }
+diff --git a/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/protocolPB/ClientNamenodeProtocolTranslatorPB.java b/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/protocolPB/ClientNamenodeProtocolTranslatorPB.java
+index 4ec6f9e..850b58b 100644
+--- a/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/protocolPB/ClientNamenodeProtocolTranslatorPB.java
++++ b/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/protocolPB/ClientNamenodeProtocolTranslatorPB.java
+@@ -58,6 +58,7 @@
+ import org.apache.hadoop.hdfs.protocol.DatanodeID;
+ import org.apache.hadoop.hdfs.protocol.DatanodeInfo;
+ import org.apache.hadoop.hdfs.protocol.DirectoryListing;
++import org.apache.hadoop.hdfs.protocol.ErasureCodingZone;
+ import org.apache.hadoop.hdfs.protocol.EncryptionZone;
+ import org.apache.hadoop.hdfs.protocol.ExtendedBlock;
+ import org.apache.hadoop.hdfs.protocol.HdfsConstants.DatanodeReportType;
+@@ -164,6 +165,12 @@
+ import org.apache.hadoop.hdfs.protocol.proto.EncryptionZonesProtos.CreateEncryptionZoneRequestProto;
+ import org.apache.hadoop.hdfs.protocol.proto.EncryptionZonesProtos.GetEZForPathRequestProto;
+ import org.apache.hadoop.hdfs.protocol.proto.EncryptionZonesProtos.ListEncryptionZonesRequestProto;
++import org.apache.hadoop.hdfs.protocol.proto.ErasureCodingProtos.GetECSchemasRequestProto;
++import org.apache.hadoop.hdfs.protocol.proto.ErasureCodingProtos.GetECSchemasResponseProto;
++import org.apache.hadoop.hdfs.protocol.proto.ErasureCodingProtos.GetErasureCodingZoneRequestProto;
++import org.apache.hadoop.hdfs.protocol.proto.ErasureCodingProtos.GetErasureCodingZoneResponseProto;
++import org.apache.hadoop.hdfs.protocol.proto.ErasureCodingProtos.CreateErasureCodingZoneRequestProto;
++import org.apache.hadoop.hdfs.protocol.proto.HdfsProtos.ECSchemaProto;
+ import org.apache.hadoop.hdfs.protocol.proto.XAttrProtos.GetXAttrsRequestProto;
+ import org.apache.hadoop.hdfs.protocol.proto.XAttrProtos.ListXAttrsRequestProto;
+ import org.apache.hadoop.hdfs.protocol.proto.XAttrProtos.RemoveXAttrRequestProto;
+@@ -175,6 +182,7 @@
+ import org.apache.hadoop.hdfs.server.protocol.DatanodeStorageReport;
+ import org.apache.hadoop.io.EnumSetWritable;
+ import org.apache.hadoop.io.Text;
++import org.apache.hadoop.io.erasurecode.ECSchema;
+ import org.apache.hadoop.ipc.ProtobufHelper;
+ import org.apache.hadoop.ipc.ProtocolMetaInterface;
+ import org.apache.hadoop.ipc.ProtocolTranslator;
+@@ -232,6 +240,10 @@
+   VOID_GET_STORAGE_POLICIES_REQUEST =
+       GetStoragePoliciesRequestProto.newBuilder().build();
+ 
++  private final static GetECSchemasRequestProto
++  VOID_GET_ECSCHEMAS_REQUEST = GetECSchemasRequestProto
++      .newBuilder().build();
++
+   public ClientNamenodeProtocolTranslatorPB(ClientNamenodeProtocolPB proxy) {
+     rpcProxy = proxy;
+   }
+@@ -1515,4 +1527,56 @@ public EventBatchList getEditsFromTxid(long txid) throws IOException {
+       throw ProtobufHelper.getRemoteException(e);
+     }
+   }
++
++  @Override
++  public ECSchema[] getECSchemas() throws IOException {
++    try {
++      GetECSchemasResponseProto response = rpcProxy.getECSchemas(null,
++          VOID_GET_ECSCHEMAS_REQUEST);
++      ECSchema[] schemas = new ECSchema[response.getSchemasCount()];
++      int i = 0;
++      for (ECSchemaProto schemaProto : response.getSchemasList()) {
++        schemas[i++] = PBHelper.convertECSchema(schemaProto);
++      }
++      return schemas;
++    } catch (ServiceException e) {
++      throw ProtobufHelper.getRemoteException(e);
++    }
++  }
++
++  @Override
++  public ErasureCodingZone getErasureCodingZone(String src) throws IOException {
++    GetErasureCodingZoneRequestProto req = GetErasureCodingZoneRequestProto.newBuilder()
++        .setSrc(src).build();
++    try {
++      GetErasureCodingZoneResponseProto response = rpcProxy.getErasureCodingZone(
++          null, req);
++      if (response.hasECZone()) {
++        return PBHelper.convertErasureCodingZone(response.getECZone());
++      }
++      return null;
++    } catch (ServiceException e) {
++      throw ProtobufHelper.getRemoteException(e);
++    }
++  }
++
++  @Override
++  public void createErasureCodingZone(String src, ECSchema schema, int cellSize)
++      throws IOException {
++    final CreateErasureCodingZoneRequestProto.Builder builder =
++        CreateErasureCodingZoneRequestProto.newBuilder();
++    builder.setSrc(src);
++    if (schema != null) {
++      builder.setSchema(PBHelper.convertECSchema(schema));
++    }
++    if (cellSize > 0) {
++      builder.setCellSize(cellSize);
++    }
++    CreateErasureCodingZoneRequestProto req = builder.build();
++    try {
++      rpcProxy.createErasureCodingZone(null, req);
++    } catch (ServiceException e) {
++      throw ProtobufHelper.getRemoteException(e);
++    }
++  }
+ }
+diff --git a/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/protocolPB/PBHelper.java b/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/protocolPB/PBHelper.java
+index 32d9614..28bac77 100644
+--- a/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/protocolPB/PBHelper.java
++++ b/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/protocolPB/PBHelper.java
+@@ -28,8 +28,13 @@
+ import java.io.InputStream;
+ import java.util.ArrayList;
+ import java.util.Arrays;
++import java.util.Collection;
+ import java.util.EnumSet;
++import java.util.HashMap;
+ import java.util.List;
++import java.util.Map;
++import java.util.Map.Entry;
++import java.util.Set;
+ 
+ import org.apache.hadoop.fs.CacheFlag;
+ import org.apache.hadoop.fs.ContentSummary;
+@@ -72,6 +77,7 @@
+ import org.apache.hadoop.hdfs.protocol.EncryptionZone;
+ import org.apache.hadoop.hdfs.protocol.ExtendedBlock;
+ import org.apache.hadoop.fs.FileEncryptionInfo;
++import org.apache.hadoop.hdfs.protocol.ErasureCodingZone;
+ import org.apache.hadoop.hdfs.protocol.FsPermissionExtension;
+ import org.apache.hadoop.hdfs.protocol.HdfsConstants;
+ import org.apache.hadoop.hdfs.protocol.HdfsConstants.DatanodeReportType;
+@@ -125,7 +131,9 @@
+ import org.apache.hadoop.hdfs.protocol.proto.DatanodeProtocolProtos.RegisterCommandProto;
+ import org.apache.hadoop.hdfs.protocol.proto.DatanodeProtocolProtos.VolumeFailureSummaryProto;
+ import org.apache.hadoop.hdfs.protocol.proto.DatanodeProtocolProtos.BlockReportContextProto;
+-import org.apache.hadoop.hdfs.protocol.proto.HdfsProtos;
++import org.apache.hadoop.hdfs.protocol.proto.ErasureCodingProtos.ErasureCodingZoneProto;
++import org.apache.hadoop.hdfs.protocol.proto.HdfsProtos.ECSchemaOptionEntryProto;
++import org.apache.hadoop.hdfs.protocol.proto.HdfsProtos.ECSchemaProto;
+ import org.apache.hadoop.hdfs.protocol.proto.HdfsProtos.BlockKeyProto;
+ import org.apache.hadoop.hdfs.protocol.proto.HdfsProtos.BlockProto;
+ import org.apache.hadoop.hdfs.protocol.proto.HdfsProtos.BlockStoragePolicyProto;
+@@ -223,6 +231,7 @@
+ import org.apache.hadoop.hdfs.util.ExactSizeInputStream;
+ import org.apache.hadoop.io.EnumSetWritable;
+ import org.apache.hadoop.io.Text;
++import org.apache.hadoop.io.erasurecode.ECSchema;
+ import org.apache.hadoop.security.proto.SecurityProtos.TokenProto;
+ import org.apache.hadoop.security.token.Token;
+ import org.apache.hadoop.util.DataChecksum;
+@@ -1283,8 +1292,9 @@ public static LocatedBlocks convert(LocatedBlocksProto lb) {
+         PBHelper.convertLocatedBlock(lb.getBlocksList()),
+         lb.hasLastBlock() ? PBHelper.convert(lb.getLastBlock()) : null,
+         lb.getIsLastBlockComplete(),
+-        lb.hasFileEncryptionInfo() ? convert(lb.getFileEncryptionInfo()) :
+-            null);
++        lb.hasFileEncryptionInfo() ? convert(lb.getFileEncryptionInfo()) : null,
++        lb.hasECSchema() ? convertECSchema(lb.getECSchema()) : null,
++        lb.hasStripeCellSize() ? lb.getStripeCellSize() : 0);
+   }
+   
+   public static LocatedBlocksProto convert(LocatedBlocks lb) {
+@@ -1299,6 +1309,12 @@ public static LocatedBlocksProto convert(LocatedBlocks lb) {
+     if (lb.getFileEncryptionInfo() != null) {
+       builder.setFileEncryptionInfo(convert(lb.getFileEncryptionInfo()));
+     }
++    if (lb.getECSchema() != null) {
++      builder.setECSchema(convertECSchema(lb.getECSchema()));
++    }
++    if (lb.getStripeCellSize() != 0) {
++      builder.setStripeCellSize(lb.getStripeCellSize());
++    }
+     return builder.setFileLength(lb.getFileLength())
+         .setUnderConstruction(lb.isUnderConstruction())
+         .addAllBlocks(PBHelper.convertLocatedBlock2(lb.getLocatedBlocks()))
+@@ -1441,7 +1457,9 @@ public static HdfsFileStatus convert(HdfsFileStatusProto fs) {
+         fs.hasChildrenNum() ? fs.getChildrenNum() : -1,
+         fs.hasFileEncryptionInfo() ? convert(fs.getFileEncryptionInfo()) : null,
+         fs.hasStoragePolicy() ? (byte) fs.getStoragePolicy()
+-            : HdfsConstants.BLOCK_STORAGE_POLICY_ID_UNSPECIFIED);
++            : HdfsConstants.BLOCK_STORAGE_POLICY_ID_UNSPECIFIED,
++        fs.hasEcSchema() ? PBHelper.convertECSchema(fs.getEcSchema()) : null,
++        fs.hasStripeCellSize() ? fs.getStripeCellSize() : 0);
+   }
+ 
+   public static SnapshottableDirectoryStatus convert(
+@@ -1502,6 +1520,10 @@ public static HdfsFileStatusProto convert(HdfsFileStatus fs) {
+         builder.setLocations(PBHelper.convert(locations));
+       }
+     }
++    if(fs.getECSchema() != null) {
++      builder.setEcSchema(PBHelper.convertECSchema(fs.getECSchema()));
++    }
++    builder.setStripeCellSize(fs.getStripeCellSize());
+     return builder.build();
+   }
+   
+@@ -3053,4 +3075,41 @@ public static BlockReportContextProto convert(BlockReportContext context) {
+         setLeaseId(context.getLeaseId()).
+         build();
+   }
++
++  public static ECSchema convertECSchema(ECSchemaProto schema) {
++    List<ECSchemaOptionEntryProto> optionsList = schema.getOptionsList();
++    Map<String, String> options = new HashMap<>(optionsList.size());
++    for (ECSchemaOptionEntryProto option : optionsList) {
++      options.put(option.getKey(), option.getValue());
++    }
++    return new ECSchema(schema.getSchemaName(), schema.getCodecName(),
++        schema.getDataUnits(), schema.getParityUnits(), options);
++  }
++
++  public static ECSchemaProto convertECSchema(ECSchema schema) {
++    ECSchemaProto.Builder builder = ECSchemaProto.newBuilder()
++        .setSchemaName(schema.getSchemaName())
++        .setCodecName(schema.getCodecName())
++        .setDataUnits(schema.getNumDataUnits())
++        .setParityUnits(schema.getNumParityUnits());
++    Set<Entry<String, String>> entrySet = schema.getExtraOptions().entrySet();
++    for (Entry<String, String> entry : entrySet) {
++      builder.addOptions(ECSchemaOptionEntryProto.newBuilder()
++          .setKey(entry.getKey()).setValue(entry.getValue()).build());
++    }
++    return builder.build();
++  }
++
++  public static ErasureCodingZoneProto convertErasureCodingZone(
++      ErasureCodingZone ecZone) {
++    return ErasureCodingZoneProto.newBuilder().setDir(ecZone.getDir())
++        .setSchema(convertECSchema(ecZone.getSchema()))
++        .setCellSize(ecZone.getCellSize()).build();
++  }
++
++  public static ErasureCodingZone convertErasureCodingZone(
++      ErasureCodingZoneProto ecZoneProto) {
++    return new ErasureCodingZone(ecZoneProto.getDir(),
++        convertECSchema(ecZoneProto.getSchema()), ecZoneProto.getCellSize());
++  }
+ }
