@@ -450,3 +450,54 @@ index 4a8f40f..930001a 100644
    @VisibleForTesting
    public static void setBlockMoveWaitTime(long time) {
      blockMoveWaitTime = time;
+diff --git a/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/blockmanagement/BlockManager.java b/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/blockmanagement/BlockManager.java
+index 763f560..99e5d91 100644
+--- a/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/blockmanagement/BlockManager.java
++++ b/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/blockmanagement/BlockManager.java
+@@ -83,6 +83,7 @@
+ import org.apache.hadoop.hdfs.server.protocol.BlockReportContext;
+ import org.apache.hadoop.hdfs.server.protocol.BlocksWithLocations;
+ import org.apache.hadoop.hdfs.server.protocol.BlocksWithLocations.BlockWithLocations;
++import org.apache.hadoop.hdfs.server.protocol.BlocksWithLocations.StripedBlockWithLocations;
+ import org.apache.hadoop.hdfs.server.protocol.DatanodeCommand;
+ import org.apache.hadoop.hdfs.server.protocol.DatanodeRegistration;
+ import org.apache.hadoop.hdfs.server.protocol.DatanodeStorage;
+@@ -3430,7 +3431,8 @@ public void removeStoredBlock(BlockInfo storedBlock,
+ 
+   /**
+    * Get all valid locations of the block & add the block to results
+-   * return the length of the added block; 0 if the block is not added
++   * return the length of the added block; 0 if the block is not added.  If the
++   * added block is a block group, return its approximate internal block size.
+    */
+   private long addBlock(BlockInfo block, List<BlockWithLocations> results) {
+     final List<DatanodeStorageInfo> locations = getValidLocations(block);
+@@ -3446,9 +3448,25 @@ private long addBlock(BlockInfo block, List<BlockWithLocations> results) {
+         storageIDs[i] = s.getStorageID();
+         storageTypes[i] = s.getStorageType();
+       }
+-      results.add(new BlockWithLocations(block, datanodeUuids, storageIDs,
+-          storageTypes));
+-      return block.getNumBytes();
++      BlockWithLocations blkWithLocs = new BlockWithLocations(block,
++          datanodeUuids, storageIDs, storageTypes);
++      if(block.isStriped()) {
++        BlockInfoStriped blockStriped = (BlockInfoStriped) block;
++        byte[] indices = new byte[locations.size()];
++        for (int i = 0; i < locations.size(); i++) {
++          indices[i] =
++              (byte) blockStriped.getStripedBlockStorageOp().
++                  getStorageBlockIndex(locations.get(i));
++        }
++        results.add(new StripedBlockWithLocations(blkWithLocs, indices,
++            blockStriped.getStripedBlockStorageOp().getDataBlockNum()));
++        // approximate size
++        return block.getNumBytes() /
++            blockStriped.getStripedBlockStorageOp().getDataBlockNum();
++      }else{
++        results.add(blkWithLocs);
++        return block.getNumBytes();
++      }
+     }
+   }
+ 

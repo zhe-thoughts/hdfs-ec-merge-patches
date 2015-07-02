@@ -263,10 +263,10 @@ index 0000000..e9054ef
 +}
 diff --git a/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/blockmanagement/StripedBlockStorageOp.java b/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/blockmanagement/StripedBlockStorageOp.java
 new file mode 100644
-index 0000000..acc04a7
+index 0000000..0784df6
 --- /dev/null
 +++ b/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/blockmanagement/StripedBlockStorageOp.java
-@@ -0,0 +1,218 @@
+@@ -0,0 +1,238 @@
 +/**
 + * Licensed to the Apache Software Foundation (ASF) under one
 + * or more contributor license agreements.  See the NOTICE file
@@ -288,6 +288,7 @@ index 0000000..acc04a7
 +
 +import com.google.common.base.Preconditions;
 +import org.apache.hadoop.hdfs.protocol.Block;
++import org.apache.hadoop.hdfs.server.common.HdfsServerConstants.BlockUCState;
 +import org.apache.hadoop.hdfs.util.StripedBlockUtil;
 +import org.apache.hadoop.io.erasurecode.ECSchema;
 +
@@ -484,4 +485,23 @@ index 0000000..acc04a7
 +      }
 +    }
 +  }
++
++  /**
++   * If the block is committed/completed and its length is less than a full
++   * stripe, it returns the the number of actual data blocks.
++   * Otherwise it returns the number of data units specified by schema.
++   */
++  public short getRealDataBlockNum() {
++    if (b.isComplete() || b.getBlockUCState() == BlockUCState.COMMITTED) {
++      return (short) Math.min(getDataBlockNum(),
++          (b.getNumBytes() - 1) / BLOCK_STRIPED_CELL_SIZE + 1);
++    } else {
++      return getDataBlockNum();
++    }
++  }
++
++  public short getRealTotalBlockNum() {
++    return (short) (getRealDataBlockNum() + getParityBlockNum());
++  }
++
 +}
