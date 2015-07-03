@@ -1,0 +1,324 @@
+diff --git a/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/namenode/FSEditLogLoader.java b/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/namenode/FSEditLogLoader.java
+index f7f6e9c..d12d27a 100644
+--- a/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/namenode/FSEditLogLoader.java
++++ b/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/namenode/FSEditLogLoader.java
+@@ -36,6 +36,7 @@
+ import org.apache.hadoop.classification.InterfaceStability;
+ import org.apache.hadoop.fs.FileSystem;
+ import org.apache.hadoop.fs.XAttrSetFlag;
++import org.apache.hadoop.hdfs.protocol.ErasureCodingZone;
+ import org.apache.hadoop.hdfs.protocol.HdfsConstants;
+ import org.apache.hadoop.hdfs.protocol.LocatedBlock;
+ import org.apache.hadoop.hdfs.protocol.Block;
+@@ -46,8 +47,10 @@
+ import org.apache.hadoop.hdfs.server.blockmanagement.BlockIdManager;
+ import org.apache.hadoop.hdfs.server.blockmanagement.BlockInfo;
+ import org.apache.hadoop.hdfs.server.blockmanagement.BlockInfoContiguous;
++import org.apache.hadoop.hdfs.server.blockmanagement.BlockInfoStriped;
+ import org.apache.hadoop.hdfs.server.blockmanagement.BlockInfoUnderConstruction;
+ import org.apache.hadoop.hdfs.server.blockmanagement.BlockInfoUnderConstructionContiguous;
++import org.apache.hadoop.hdfs.server.blockmanagement.BlockInfoUnderConstructionStriped;
+ import org.apache.hadoop.hdfs.server.common.HdfsServerConstants;
+ import org.apache.hadoop.hdfs.server.common.HdfsServerConstants.RollingUpgradeStartupOption;
+ import org.apache.hadoop.hdfs.server.common.HdfsServerConstants.StartupOption;
+@@ -415,7 +418,9 @@ private long applyEditLogOp(FSEditLogOp op, FSDirectory fsDir,
+       // Update the salient file attributes.
+       newFile.setAccessTime(addCloseOp.atime, Snapshot.CURRENT_STATE_ID);
+       newFile.setModificationTime(addCloseOp.mtime, Snapshot.CURRENT_STATE_ID);
+-      updateBlocks(fsDir, addCloseOp, iip, newFile);
++      ErasureCodingZone ecZone = FSDirErasureCodingOp.getErasureCodingZone(
++          fsDir.getFSNamesystem(), iip);
++      updateBlocks(fsDir, addCloseOp, iip, newFile, ecZone);
+       break;
+     }
+     case OP_CLOSE: {
+@@ -435,7 +440,9 @@ private long applyEditLogOp(FSEditLogOp op, FSDirectory fsDir,
+       // Update the salient file attributes.
+       file.setAccessTime(addCloseOp.atime, Snapshot.CURRENT_STATE_ID);
+       file.setModificationTime(addCloseOp.mtime, Snapshot.CURRENT_STATE_ID);
+-      updateBlocks(fsDir, addCloseOp, iip, file);
++      ErasureCodingZone ecZone = FSDirErasureCodingOp.getErasureCodingZone(
++          fsDir.getFSNamesystem(), iip);
++      updateBlocks(fsDir, addCloseOp, iip, file, ecZone);
+ 
+       // Now close the file
+       if (!file.isUnderConstruction() &&
+@@ -493,7 +500,9 @@ private long applyEditLogOp(FSEditLogOp op, FSDirectory fsDir,
+       INodesInPath iip = fsDir.getINodesInPath(path, true);
+       INodeFile oldFile = INodeFile.valueOf(iip.getLastINode(), path);
+       // Update in-memory data structures
+-      updateBlocks(fsDir, updateOp, iip, oldFile);
++      ErasureCodingZone ecZone = FSDirErasureCodingOp.getErasureCodingZone(
++          fsDir.getFSNamesystem(), iip);
++      updateBlocks(fsDir, updateOp, iip, oldFile, ecZone);
+       
+       if (toAddRetryCache) {
+         fsNamesys.addCacheEntry(updateOp.rpcClientId, updateOp.rpcCallId);
+@@ -507,9 +516,12 @@ private long applyEditLogOp(FSEditLogOp op, FSDirectory fsDir,
+         FSNamesystem.LOG.debug(op.opCode + ": " + path +
+             " new block id : " + addBlockOp.getLastBlock().getBlockId());
+       }
+-      INodeFile oldFile = INodeFile.valueOf(fsDir.getINode(path), path);
++      INodesInPath iip = fsDir.getINodesInPath(path, true);
++      INodeFile oldFile = INodeFile.valueOf(iip.getLastINode(), path);
+       // add the new block to the INodeFile
+-      addNewBlock(fsDir, addBlockOp, oldFile);
++      ErasureCodingZone ecZone = FSDirErasureCodingOp.getErasureCodingZone(
++          fsDir.getFSNamesystem(), iip);
++      addNewBlock(addBlockOp, oldFile, ecZone);
+       break;
+     }
+     case OP_SET_REPLICATION: {
+@@ -950,8 +962,8 @@ private static String formatEditLogReplayError(EditLogInputStream in,
+   /**
+    * Add a new block into the given INodeFile
+    */
+-  private void addNewBlock(FSDirectory fsDir, AddBlockOp op, INodeFile file)
+-      throws IOException {
++  private void addNewBlock(AddBlockOp op, INodeFile file,
++      ErasureCodingZone ecZone) throws IOException {
+     BlockInfo[] oldBlocks = file.getBlocks();
+     Block pBlock = op.getPenultimateBlock();
+     Block newBlock= op.getLastBlock();
+@@ -959,7 +971,7 @@ private void addNewBlock(FSDirectory fsDir, AddBlockOp op, INodeFile file)
+     if (pBlock != null) { // the penultimate block is not null
+       Preconditions.checkState(oldBlocks != null && oldBlocks.length > 0);
+       // compare pBlock with the last block of oldBlocks
+-      Block oldLastBlock = oldBlocks[oldBlocks.length - 1];
++      BlockInfo oldLastBlock = oldBlocks[oldBlocks.length - 1];
+       if (oldLastBlock.getBlockId() != pBlock.getBlockId()
+           || oldLastBlock.getGenerationStamp() != pBlock.getGenerationStamp()) {
+         throw new IOException(
+@@ -978,10 +990,17 @@ private void addNewBlock(FSDirectory fsDir, AddBlockOp op, INodeFile file)
+       Preconditions.checkState(oldBlocks == null || oldBlocks.length == 0);
+     }
+     // add the new block
+-    BlockInfo newBI = new BlockInfoUnderConstructionContiguous(
+-          newBlock, file.getPreferredBlockReplication());
+-    fsNamesys.getBlockManager().addBlockCollection(newBI, file);
+-    file.addBlock(newBI);
++    final BlockInfo newBlockInfo;
++    boolean isStriped = ecZone != null;
++    if (isStriped) {
++      newBlockInfo = new BlockInfoUnderConstructionStriped(newBlock,
++          ecZone.getSchema(), ecZone.getCellSize());
++    } else {
++      newBlockInfo = new BlockInfoUnderConstructionContiguous(newBlock,
++          file.getPreferredBlockReplication());
++    }
++    fsNamesys.getBlockManager().addBlockCollectionWithCheck(newBlockInfo, file);
++    file.addBlock(newBlockInfo);
+     fsNamesys.getBlockManager().processQueuedMessagesForBlock(newBlock);
+   }
+   
+@@ -990,7 +1009,8 @@ private void addNewBlock(FSDirectory fsDir, AddBlockOp op, INodeFile file)
+    * @throws IOException
+    */
+   private void updateBlocks(FSDirectory fsDir, BlockListUpdatingOp op,
+-      INodesInPath iip, INodeFile file) throws IOException {
++      INodesInPath iip, INodeFile file, ErasureCodingZone ecZone)
++      throws IOException {
+     // Update its block list
+     BlockInfo[] oldBlocks = file.getBlocks();
+     Block[] newBlocks = op.getBlocks();
+@@ -1050,25 +1070,38 @@ private void updateBlocks(FSDirectory fsDir, BlockListUpdatingOp op,
+         throw new IOException("Trying to delete non-existant block " + oldBlock);
+       }
+     } else if (newBlocks.length > oldBlocks.length) {
++      final boolean isStriped = ecZone != null;
+       // We're adding blocks
+       for (int i = oldBlocks.length; i < newBlocks.length; i++) {
+         Block newBlock = newBlocks[i];
+-        BlockInfo newBI;
++        final BlockInfo newBI;
+         if (!op.shouldCompleteLastBlock()) {
+           // TODO: shouldn't this only be true for the last block?
+           // what about an old-version fsync() where fsync isn't called
+           // until several blocks in?
+-          newBI = new BlockInfoUnderConstructionContiguous(
+-              newBlock, file.getPreferredBlockReplication());
++          if (isStriped) {
++            newBI = new BlockInfoUnderConstructionStriped(newBlock,
++                ecZone.getSchema(), ecZone.getCellSize());
++          } else {
++            newBI = new BlockInfoUnderConstructionContiguous(newBlock,
++                file.getPreferredBlockReplication());
++          }
+         } else {
+           // OP_CLOSE should add finalized blocks. This code path
+           // is only executed when loading edits written by prior
+           // versions of Hadoop. Current versions always log
+           // OP_ADD operations as each block is allocated.
+-          newBI = new BlockInfoContiguous(newBlock,
+-              file.getPreferredBlockReplication());
++          // TODO: ECSchema can be restored from persisted file (HDFS-7859).
++          if (isStriped) {
++            newBI = new BlockInfoStriped(newBlock,
++                ErasureCodingSchemaManager.getSystemDefaultSchema(),
++                ecZone.getCellSize());
++          } else {
++            newBI = new BlockInfoContiguous(newBlock,
++                file.getPreferredBlockReplication());
++          }
+         }
+-        fsNamesys.getBlockManager().addBlockCollection(newBI, file);
++        fsNamesys.getBlockManager().addBlockCollectionWithCheck(newBI, file);
+         file.addBlock(newBI);
+         fsNamesys.getBlockManager().processQueuedMessagesForBlock(newBlock);
+       }
+diff --git a/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/namenode/FSImageFormat.java b/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/namenode/FSImageFormat.java
+index 6bdf984..0a1de0f 100644
+--- a/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/namenode/FSImageFormat.java
++++ b/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/namenode/FSImageFormat.java
+@@ -692,7 +692,7 @@ public void updateBlocksMap(INodeFile file) {
+       if (blocks != null) {
+         final BlockManager bm = namesystem.getBlockManager();
+         for (int i = 0; i < blocks.length; i++) {
+-          file.setBlock(i, bm.addBlockCollection(blocks[i], file));
++          file.setBlock(i, bm.addBlockCollectionWithCheck(blocks[i], file));
+         } 
+       }
+     }
+@@ -963,8 +963,8 @@ private void loadFilesUnderConstruction(DataInput in,
+         if (oldnode.numBlocks() > 0) {
+           BlockInfo ucBlock = cons.getLastBlock();
+           // we do not replace the inode, just replace the last block of oldnode
+-          BlockInfo info = namesystem.getBlockManager().addBlockCollection(
+-              ucBlock, oldnode);
++          BlockInfo info = namesystem.getBlockManager().
++              addBlockCollectionWithCheck(ucBlock, oldnode);
+           oldnode.setBlock(oldnode.numBlocks() - 1, info);
+         }
+ 
+diff --git a/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/namenode/FSImageFormatPBINode.java b/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/namenode/FSImageFormatPBINode.java
+index d90751c..b25a7c5 100644
+--- a/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/namenode/FSImageFormatPBINode.java
++++ b/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/namenode/FSImageFormatPBINode.java
+@@ -44,7 +44,9 @@
+ import org.apache.hadoop.hdfs.protocolPB.PBHelper;
+ import org.apache.hadoop.hdfs.server.blockmanagement.BlockInfo;
+ import org.apache.hadoop.hdfs.server.blockmanagement.BlockInfoContiguous;
++import org.apache.hadoop.hdfs.server.blockmanagement.BlockInfoStriped;
+ import org.apache.hadoop.hdfs.server.blockmanagement.BlockInfoUnderConstructionContiguous;
++import org.apache.hadoop.hdfs.server.blockmanagement.BlockInfoUnderConstructionStriped;
+ import org.apache.hadoop.hdfs.server.blockmanagement.BlockManager;
+ import org.apache.hadoop.hdfs.server.namenode.FSImageFormatProtobuf.LoaderContext;
+ import org.apache.hadoop.hdfs.server.namenode.FSImageFormatProtobuf.SaverContext;
+@@ -57,6 +59,7 @@
+ import org.apache.hadoop.hdfs.server.namenode.FsImageProto.INodeSection.XAttrFeatureProto;
+ import org.apache.hadoop.hdfs.server.namenode.FsImageProto.INodeSection.QuotaByStorageTypeEntryProto;
+ import org.apache.hadoop.hdfs.server.namenode.FsImageProto.INodeSection.QuotaByStorageTypeFeatureProto;
++import org.apache.hadoop.hdfs.server.namenode.FsImageProto.INodeSection.StripedBlocksFeature;
+ import org.apache.hadoop.hdfs.server.namenode.snapshot.Snapshot;
+ import org.apache.hadoop.hdfs.server.namenode.startupprogress.Phase;
+ import org.apache.hadoop.hdfs.server.namenode.startupprogress.StartupProgress;
+@@ -68,6 +71,7 @@
+ import com.google.common.base.Preconditions;
+ import com.google.common.collect.ImmutableList;
+ import com.google.protobuf.ByteString;
++import org.apache.hadoop.io.erasurecode.ECSchema;
+ 
+ @InterfaceAudience.Private
+ public final class FSImageFormatPBINode {
+@@ -218,7 +222,7 @@ public static void updateBlocksMap(INodeFile file, BlockManager bm) {
+       final BlockInfo[] blocks = file.getBlocks();
+       if (blocks != null) {
+         for (int i = 0; i < blocks.length; i++) {
+-          file.setBlock(i, bm.addBlockCollection(blocks[i], file));
++          file.setBlock(i, bm.addBlockCollectionWithCheck(blocks[i], file));
+         }
+       }
+     }
+@@ -334,9 +338,11 @@ private INodeFile loadINodeFile(INodeSection.INode n) {
+       LoaderContext state = parent.getLoaderContext();
+ 
+       BlockInfo[] blocks = new BlockInfo[bp.size()];
+-      for (int i = 0, e = bp.size(); i < e; ++i) {
+-        blocks[i] =
+-            new BlockInfoContiguous(PBHelper.convert(bp.get(i)), replication);
++      if (!f.hasStripedBlocks()) {
++        blocks = new BlockInfoContiguous[bp.size()];
++        for (int i = 0, e = bp.size(); i < e; ++i) {
++          blocks[i] = new BlockInfoContiguous(PBHelper.convert(bp.get(i)), replication);
++        }
+       }
+       final PermissionStatus permissions = loadPermission(f.getPermission(),
+           parent.getLoaderContext().getStringTable());
+@@ -357,15 +363,39 @@ private INodeFile loadINodeFile(INodeSection.INode n) {
+             loadXAttrs(f.getXAttrs(), state.getStringTable())));
+       }
+ 
++      FileWithStripedBlocksFeature stripeFeature = null;
++      if (f.hasStripedBlocks()) {
++        // TODO: HDFS-7859
++        ECSchema schema = ErasureCodingSchemaManager.getSystemDefaultSchema();
++        stripeFeature = file.addStripedBlocksFeature();
++        if (bp.size() > 0) {
++          // if a striped file has block, the cellSize must exist in proto
++          final int cellSize = f.getStripedBlocks().getCellSize();
++          for (BlockProto b : bp) {
++            stripeFeature.addBlock(new BlockInfoStriped(PBHelper.convert(b),
++                schema, cellSize));
++          }
++        }
++      }
++
+       // under-construction information
+       if (f.hasFileUC()) {
+         INodeSection.FileUnderConstructionFeature uc = f.getFileUC();
+         file.toUnderConstruction(uc.getClientName(), uc.getClientMachine());
+-        if (blocks.length > 0) {
+-          BlockInfo lastBlk = file.getLastBlock();
++        BlockInfo lastBlk = file.getLastBlock();
++        if (lastBlk != null) {
+           // replace the last block of file
+-          file.setBlock(file.numBlocks() - 1,
+-              new BlockInfoUnderConstructionContiguous(lastBlk, replication));
++          final BlockInfo ucBlk;
++          if (stripeFeature != null) {
++            BlockInfoStriped striped = (BlockInfoStriped) lastBlk;
++            ucBlk = new BlockInfoUnderConstructionStriped(striped,
++                striped.getStripedBlockStorageOp().getSchema(),
++                striped.getStripedBlockStorageOp().getCellSize());
++          } else {
++            ucBlk = new BlockInfoUnderConstructionContiguous(lastBlk,
++                replication);
++          }
++          file.setBlock(file.numBlocks() - 1, ucBlk);
+         }
+       }
+       return file;
+@@ -634,12 +664,31 @@ private void save(OutputStream out, INodeFile n) throws IOException {
+       INodeSection.INodeFile.Builder b = buildINodeFile(n,
+           parent.getSaverContext());
+ 
+-      if (n.getBlocks() != null) {
+-        for (Block block : n.getBlocks()) {
++      BlockInfo[] cBlks = n.getContiguousBlocks();
++      if (cBlks != null) {
++        for (Block block : cBlks) {
+           b.addBlocks(PBHelper.convert(block));
+         }
+       }
+ 
++      FileWithStripedBlocksFeature sb = n.getStripedBlocksFeature();
++      if (sb != null) {
++        StripedBlocksFeature.Builder builder =
++            StripedBlocksFeature.newBuilder();
++        BlockInfo[] sblocks = sb.getBlocks();
++        if (sblocks != null && sblocks.length > 0) {
++          final int cellSize =
++              sblocks[0].getStripedBlockStorageOp().getCellSize();
++          for (BlockInfo sblk : sblocks) {
++            assert cellSize ==
++                sblk.getStripedBlockStorageOp().getCellSize();
++            b.addBlocks(PBHelper.convert(sblk));
++          }
++          builder.setCellSize(cellSize);
++        }
++        b.setStripedBlocks(builder.build());
++      }
++
+       FileUnderConstructionFeature uc = n.getFileUnderConstructionFeature();
+       if (uc != null) {
+         INodeSection.FileUnderConstructionFeature f =

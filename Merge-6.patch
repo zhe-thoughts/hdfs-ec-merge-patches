@@ -601,3 +601,30 @@ index 9781e09..629da0b 100644
    private static class ReplicationWork {
  
      private final BlockInfo block;
+diff --git a/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/namenode/FSDirStatAndListingOp.java b/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/namenode/FSDirStatAndListingOp.java
+index 23261a1..c7242d0 100644
+--- a/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/namenode/FSDirStatAndListingOp.java
++++ b/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/namenode/FSDirStatAndListingOp.java
+@@ -518,9 +518,12 @@ private static HdfsLocatedFileStatus createLocatedFileStatus(
+       final long fileSize = !inSnapshot && isUc ?
+           fileNode.computeFileSizeNotIncludingLastUcBlock() : size;
+ 
++      final ErasureCodingZone ecZone = FSDirErasureCodingOp.getErasureCodingZone(
++          fsd.getFSNamesystem(), iip);
++
+       loc = fsd.getFSNamesystem().getBlockManager().createLocatedBlocks(
+           fileNode.getBlocks(snapshot), fileSize, isUc, 0L, size, false,
+-          inSnapshot, feInfo);
++          inSnapshot, feInfo, ecZone);
+       if (loc == null) {
+         loc = new LocatedBlocks();
+       }
+@@ -531,8 +534,6 @@ private static HdfsLocatedFileStatus createLocatedFileStatus(
+     }
+     int childrenNum = node.isDirectory() ?
+         node.asDirectory().getChildrenNum(snapshot) : 0;
+-    final ErasureCodingZone ecZone = FSDirErasureCodingOp.getErasureCodingZone(
+-        fsd.getFSNamesystem(), iip);
+     final ECSchema schema = ecZone != null ? ecZone.getSchema() : null;
+     final int cellSize = ecZone != null ? ecZone.getCellSize() : 0;
+ 

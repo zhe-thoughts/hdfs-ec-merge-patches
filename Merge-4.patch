@@ -667,3 +667,83 @@ index 250fca5..4043928 100644
 +  long BLOCK_GROUP_INDEX_MASK = 15;
 +  byte MAX_BLOCKS_IN_GROUP = 16;
  }
+diff --git a/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/namenode/FSEditLogLoader.java b/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/namenode/FSEditLogLoader.java
+index 63ef985..f7f6e9c 100644
+--- a/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/namenode/FSEditLogLoader.java
++++ b/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/namenode/FSEditLogLoader.java
+@@ -43,6 +43,7 @@
+ import org.apache.hadoop.hdfs.protocol.HdfsFileStatus;
+ import org.apache.hadoop.hdfs.protocol.LastBlockWithStatus;
+ import org.apache.hadoop.hdfs.protocol.LayoutVersion;
++import org.apache.hadoop.hdfs.server.blockmanagement.BlockIdManager;
+ import org.apache.hadoop.hdfs.server.blockmanagement.BlockInfo;
+ import org.apache.hadoop.hdfs.server.blockmanagement.BlockInfoContiguous;
+ import org.apache.hadoop.hdfs.server.blockmanagement.BlockInfoUnderConstruction;
+@@ -788,8 +789,15 @@ private long applyEditLogOp(FSEditLogOp op, FSDirectory fsDir,
+     }
+     case OP_ALLOCATE_BLOCK_ID: {
+       AllocateBlockIdOp allocateBlockIdOp = (AllocateBlockIdOp) op;
+-      fsNamesys.getBlockIdManager().setLastAllocatedBlockId(
+-          allocateBlockIdOp.blockId);
++      if (BlockIdManager.isStripedBlockID(allocateBlockIdOp.blockId)) {
++        // ALLOCATE_BLOCK_ID is added for sequential block id, thus if the id
++        // is negative, it must belong to striped blocks
++        fsNamesys.getBlockIdManager().setLastAllocatedStripedBlockId(
++            allocateBlockIdOp.blockId);
++      } else {
++        fsNamesys.getBlockIdManager().setLastAllocatedContiguousBlockId(
++            allocateBlockIdOp.blockId);
++      }
+       break;
+     }
+     case OP_ROLLING_UPGRADE_START: {
+diff --git a/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/namenode/FSImageFormat.java b/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/namenode/FSImageFormat.java
+index 2305e31..6bdf984 100644
+--- a/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/namenode/FSImageFormat.java
++++ b/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/namenode/FSImageFormat.java
+@@ -359,7 +359,8 @@ public void load(File curFile) throws IOException {
+ 
+           // read the max sequential block ID.
+           long maxSequentialBlockId = in.readLong();
+-          namesystem.getBlockIdManager().setLastAllocatedBlockId(maxSequentialBlockId);
++          namesystem.getBlockIdManager().
++              setLastAllocatedContiguousBlockId(maxSequentialBlockId);
+         } else {
+ 
+           long startingGenStamp = namesystem.getBlockIdManager()
+@@ -1270,7 +1271,7 @@ void save(File newFile, FSImageCompression compression) throws IOException {
+         out.writeLong(sourceNamesystem.getBlockIdManager().getGenerationStampV1());
+         out.writeLong(sourceNamesystem.getBlockIdManager().getGenerationStampV2());
+         out.writeLong(sourceNamesystem.getBlockIdManager().getGenerationStampAtblockIdSwitch());
+-        out.writeLong(sourceNamesystem.getBlockIdManager().getLastAllocatedBlockId());
++        out.writeLong(sourceNamesystem.getBlockIdManager().getLastAllocatedContiguousBlockId());
+         out.writeLong(context.getTxId());
+         out.writeLong(sourceNamesystem.dir.getLastInodeId());
+ 
+diff --git a/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/namenode/FSImageFormatProtobuf.java b/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/namenode/FSImageFormatProtobuf.java
+index 7c8a857..ef0cc1d 100644
+--- a/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/namenode/FSImageFormatProtobuf.java
++++ b/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/namenode/FSImageFormatProtobuf.java
+@@ -297,7 +297,11 @@ private void loadNameSystemSection(InputStream in) throws IOException {
+       blockIdManager.setGenerationStampV1(s.getGenstampV1());
+       blockIdManager.setGenerationStampV2(s.getGenstampV2());
+       blockIdManager.setGenerationStampV1Limit(s.getGenstampV1Limit());
+-      blockIdManager.setLastAllocatedBlockId(s.getLastAllocatedBlockId());
++      blockIdManager.setLastAllocatedContiguousBlockId(s.getLastAllocatedBlockId());
++      if (s.hasLastAllocatedStripedBlockId()) {
++        blockIdManager.setLastAllocatedStripedBlockId(
++            s.getLastAllocatedStripedBlockId());
++      }
+       imgTxId = s.getTransactionId();
+       if (s.hasRollingUpgradeStartTime()
+           && fsn.getFSImage().hasRollbackFSImage()) {
+@@ -549,7 +553,8 @@ private void saveNameSystemSection(FileSummary.Builder summary)
+           .setGenstampV1(blockIdManager.getGenerationStampV1())
+           .setGenstampV1Limit(blockIdManager.getGenerationStampV1Limit())
+           .setGenstampV2(blockIdManager.getGenerationStampV2())
+-          .setLastAllocatedBlockId(blockIdManager.getLastAllocatedBlockId())
++          .setLastAllocatedBlockId(blockIdManager.getLastAllocatedContiguousBlockId())
++          .setLastAllocatedStripedBlockId(blockIdManager.getLastAllocatedStripedBlockId())
+           .setTransactionId(context.getTxId());
+ 
+       // We use the non-locked version of getNamespaceInfo here since

@@ -45,3 +45,287 @@ index f11a825..0386ad5 100644
 +   */
 +  public boolean isStriped();
  }
+diff --git a/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/namenode/FSDirAttrOp.java b/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/namenode/FSDirAttrOp.java
+index b322b69..0e3ca1e 100644
+--- a/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/namenode/FSDirAttrOp.java
++++ b/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/namenode/FSDirAttrOp.java
+@@ -378,7 +378,7 @@ static INodeDirectory unprotectedSetQuota(
+   static BlockInfo[] unprotectedSetReplication(
+       FSDirectory fsd, String src, short replication, short[] blockRepls)
+       throws QuotaExceededException, UnresolvedLinkException,
+-             SnapshotAccessControlException {
++      SnapshotAccessControlException, UnsupportedActionException {
+     assert fsd.hasWriteLock();
+ 
+     final INodesInPath iip = fsd.getINodesInPath4Write(src, true);
+@@ -387,6 +387,11 @@ static INodeDirectory unprotectedSetQuota(
+       return null;
+     }
+     INodeFile file = inode.asFile();
++    if (file.isStriped()) {
++      throw new UnsupportedActionException(
++          "Cannot set replication to a file with striped blocks");
++    }
++
+     final short oldBR = file.getPreferredBlockReplication();
+ 
+     // before setFileReplication, check for increasing block replication.
+@@ -410,7 +415,7 @@ static INodeDirectory unprotectedSetQuota(
+       blockRepls[0] = oldBR;
+       blockRepls[1] = newBR;
+     }
+-    return file.getBlocks();
++    return file.getContiguousBlocks();
+   }
+ 
+   static void unprotectedSetStoragePolicy(
+diff --git a/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/namenode/FSDirConcatOp.java b/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/namenode/FSDirConcatOp.java
+index 3f22f51..8272243 100644
+--- a/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/namenode/FSDirConcatOp.java
++++ b/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/namenode/FSDirConcatOp.java
+@@ -152,6 +152,11 @@ private static void verifyTargetFile(FSDirectory fsd, final String target,
+             + " which is greater than the target file's preferred block size "
+             + targetINode.getPreferredBlockSize());
+       }
++      // TODO currently we do not support concatenating striped files
++      if (srcINodeFile.isStriped()) {
++        throw new HadoopIllegalArgumentException("concat: the src file " + src
++            + " is with striped blocks");
++      }
+       si.add(srcINodeFile);
+     }
+ 
+@@ -228,7 +233,7 @@ static void unprotectedConcat(FSDirectory fsd, INodesInPath targetIIP,
+     int count = 0;
+     for (INodeFile nodeToRemove : srcList) {
+       if(nodeToRemove != null) {
+-        nodeToRemove.setBlocks(null);
++        nodeToRemove.setContiguousBlocks(null);
+         nodeToRemove.getParent().removeChild(nodeToRemove);
+         fsd.getINodeMap().remove(nodeToRemove);
+         count++;
+diff --git a/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/namenode/FSDirWriteFileOp.java b/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/namenode/FSDirWriteFileOp.java
+index 4830d5d..76ba8ba 100644
+--- a/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/namenode/FSDirWriteFileOp.java
++++ b/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/namenode/FSDirWriteFileOp.java
+@@ -36,6 +36,7 @@
+ import org.apache.hadoop.hdfs.protocol.ClientProtocol;
+ import org.apache.hadoop.hdfs.protocol.DatanodeInfo;
+ import org.apache.hadoop.hdfs.protocol.EncryptionZone;
++import org.apache.hadoop.hdfs.protocol.ErasureCodingZone;
+ import org.apache.hadoop.hdfs.protocol.ExtendedBlock;
+ import org.apache.hadoop.hdfs.protocol.HdfsConstants;
+ import org.apache.hadoop.hdfs.protocol.HdfsFileStatus;
+@@ -45,10 +46,12 @@
+ import org.apache.hadoop.hdfs.server.blockmanagement.BlockInfo;
+ import org.apache.hadoop.hdfs.server.blockmanagement.BlockInfoUnderConstruction;
+ import org.apache.hadoop.hdfs.server.blockmanagement.BlockInfoUnderConstructionContiguous;
++import org.apache.hadoop.hdfs.server.blockmanagement.BlockInfoUnderConstructionStriped;
+ import org.apache.hadoop.hdfs.server.blockmanagement.BlockManager;
+ import org.apache.hadoop.hdfs.server.blockmanagement.DatanodeStorageInfo;
+ import org.apache.hadoop.hdfs.server.common.HdfsServerConstants;
+ import org.apache.hadoop.hdfs.server.namenode.snapshot.Snapshot;
++import org.apache.hadoop.io.erasurecode.ECSchema;
+ import org.apache.hadoop.net.Node;
+ import org.apache.hadoop.net.NodeBase;
+ import org.apache.hadoop.util.ChunkedArrayList;
+@@ -168,9 +171,10 @@ static ValidateAddBlockResult validateAddBlock(
+       String src, long fileId, String clientName,
+       ExtendedBlock previous, LocatedBlock[] onRetryBlock) throws IOException {
+     final long blockSize;
+-    final int replication;
++    final int numTargets;
+     final byte storagePolicyID;
+     String clientMachine;
++    final boolean isStriped;
+ 
+     byte[][] pathComponents = FSDirectory.getPathComponentsForReservedPath(src);
+     src = fsn.dir.resolvePath(pc, src, pathComponents);
+@@ -196,16 +200,19 @@ static ValidateAddBlockResult validateAddBlock(
+     blockSize = pendingFile.getPreferredBlockSize();
+     clientMachine = pendingFile.getFileUnderConstructionFeature()
+         .getClientMachine();
+-    replication = pendingFile.getFileReplication();
++    isStriped = pendingFile.isStriped();
++    numTargets = isStriped ?
++        HdfsConstants.NUM_DATA_BLOCKS + HdfsConstants.NUM_PARITY_BLOCKS :
++        pendingFile.getFileReplication();
+     storagePolicyID = pendingFile.getStoragePolicyID();
+-    return new ValidateAddBlockResult(blockSize, replication, storagePolicyID,
+-                                    clientMachine);
++    return new ValidateAddBlockResult(blockSize, numTargets, storagePolicyID,
++        clientMachine, isStriped);
+   }
+ 
+-  static LocatedBlock makeLocatedBlock(FSNamesystem fsn, Block blk,
++  static LocatedBlock makeLocatedBlock(FSNamesystem fsn, BlockInfo blk,
+       DatanodeStorageInfo[] locs, long offset) throws IOException {
+     LocatedBlock lBlk = BlockManager.newLocatedBlock(fsn.getExtendedBlock(blk),
+-                                                     locs, offset, false);
++        blk, locs, offset);
+     fsn.getBlockManager().setBlockToken(lBlk,
+                                         BlockTokenIdentifier.AccessMode.WRITE);
+     return lBlk;
+@@ -249,15 +256,17 @@ static LocatedBlock storeAllocatedBlock(FSNamesystem fsn, String src,
+                                   ExtendedBlock.getLocalBlock(previous));
+ 
+     // allocate new block, record block locations in INode.
+-    Block newBlock = fsn.createNewBlock();
++    final boolean isStriped = pendingFile.isStriped();
++    Block newBlock = fsn.createNewBlock(isStriped);
+     INodesInPath inodesInPath = INodesInPath.fromINode(pendingFile);
+-    saveAllocatedBlock(fsn, src, inodesInPath, newBlock, targets);
++    saveAllocatedBlock(fsn, src, inodesInPath, newBlock, targets, isStriped);
+ 
+     persistNewBlock(fsn, src, pendingFile);
+     offset = pendingFile.computeFileSize();
+ 
+     // Return located block
+-    return makeLocatedBlock(fsn, newBlock, targets, offset);
++    return makeLocatedBlock(fsn, fsn.getStoredBlock(newBlock), targets,
++        offset);
+   }
+ 
+   static DatanodeStorageInfo[] chooseTargetForNewBlock(
+@@ -278,9 +287,10 @@ static LocatedBlock storeAllocatedBlock(FSNamesystem fsn, String src,
+         : Arrays.asList(favoredNodes);
+ 
+     // choose targets for the new block to be allocated.
+-    return bm.chooseTarget4NewBlock(src, r.replication, clientNode,
++    return bm.chooseTarget4NewBlock(src, r.numTargets, clientNode,
+                                     excludedNodesSet, r.blockSize,
+-                                    favoredNodesList, r.storagePolicyID);
++                                    favoredNodesList, r.storagePolicyID,
++                                    r.isStriped);
+   }
+ 
+   /**
+@@ -487,6 +497,11 @@ static INodeFile addFileForEditLog(
+     try {
+       INodesInPath iip = fsd.addINode(existing, newNode);
+       if (iip != null) {
++        // check if the file is in an EC zone
++        if (FSDirErasureCodingOp.isInErasureCodingZone(fsd.getFSNamesystem(),
++            iip)) {
++          newNode.addStripedBlocksFeature();
++        }
+         if (aclEntries != null) {
+           AclStorage.updateINodeAcl(newNode, aclEntries, CURRENT_STATE_ID);
+         }
+@@ -510,23 +525,38 @@ static INodeFile addFileForEditLog(
+    */
+   private static BlockInfo addBlock(
+       FSDirectory fsd, String path, INodesInPath inodesInPath, Block block,
+-      DatanodeStorageInfo[] targets) throws IOException {
++      DatanodeStorageInfo[] targets, boolean isStriped) throws IOException {
+     fsd.writeLock();
+     try {
+       final INodeFile fileINode = inodesInPath.getLastINode().asFile();
+       Preconditions.checkState(fileINode.isUnderConstruction());
+ 
+-      // check quota limits and updated space consumed
+-      fsd.updateCount(inodesInPath, 0, fileINode.getPreferredBlockSize(),
+-          fileINode.getPreferredBlockReplication(), true);
+-
+       // associate new last block for the file
+-      BlockInfoUnderConstruction blockInfo =
+-        new BlockInfoUnderConstructionContiguous(
+-            block,
+-            fileINode.getFileReplication(),
+-            HdfsServerConstants.BlockUCState.UNDER_CONSTRUCTION,
++      final BlockInfo blockInfo;
++      if (isStriped) {
++        ErasureCodingZone ecZone = FSDirErasureCodingOp.getErasureCodingZone(
++            fsd.getFSNamesystem(), inodesInPath);
++        ECSchema ecSchema = ecZone.getSchema();
++        short numDataUnits = (short) ecSchema.getNumDataUnits();
++        short numParityUnits = (short) ecSchema.getNumParityUnits();
++        short numLocations = (short) (numDataUnits + numParityUnits);
++
++        // check quota limits and updated space consumed
++        fsd.updateCount(inodesInPath, 0, fileINode.getPreferredBlockSize(),
++            numLocations, true);
++        blockInfo = new BlockInfoUnderConstructionStriped(block, ecSchema,
++            ecZone.getCellSize(),
++            HdfsServerConstants.BlockUCState.UNDER_CONSTRUCTION, targets);
++      } else {
++        // check quota limits and updated space consumed
++        fsd.updateCount(inodesInPath, 0, fileINode.getPreferredBlockSize(),
++            fileINode.getPreferredBlockReplication(), true);
++
++        short numLocations = fileINode.getFileReplication();
++        blockInfo = new BlockInfoUnderConstructionContiguous(block,
++            numLocations, HdfsServerConstants.BlockUCState.UNDER_CONSTRUCTION,
+             targets);
++      }
+       fsd.getBlockManager().addBlockCollection(blockInfo, fileINode);
+       fileINode.addBlock(blockInfo);
+ 
+@@ -562,6 +592,11 @@ private static INodesInPath addFile(
+     fsd.writeLock();
+     try {
+       newiip = fsd.addINode(existing, newNode);
++      if (newiip != null
++          && FSDirErasureCodingOp.isInErasureCodingZone(fsd.getFSNamesystem(),
++          newiip)) {
++        newNode.addStripedBlocksFeature();
++      }
+     } finally {
+       fsd.writeUnlock();
+     }
+@@ -689,14 +724,8 @@ static boolean completeFile(FSNamesystem fsn, FSPermissionChecker pc,
+     checkBlock(fsn, last);
+     byte[][] pathComponents = FSDirectory.getPathComponentsForReservedPath(src);
+     src = fsn.dir.resolvePath(pc, src, pathComponents);
+-    boolean success = completeFileInternal(fsn, src, holder,
+-                                           ExtendedBlock.getLocalBlock(last),
+-                                           fileId);
+-    if (success) {
+-      NameNode.stateChangeLog.info("DIR* completeFile: " + srcArg
+-                                       + " is closed by " + holder);
+-    }
+-    return success;
++    return completeFileInternal(fsn, src, holder,
++        ExtendedBlock.getLocalBlock(last), fileId);
+   }
+ 
+   private static boolean completeFileInternal(
+@@ -800,11 +829,11 @@ private static void persistNewBlock(
+    */
+   private static void saveAllocatedBlock(
+       FSNamesystem fsn, String src, INodesInPath inodesInPath, Block newBlock,
+-      DatanodeStorageInfo[] targets)
++      DatanodeStorageInfo[] targets, boolean isStriped)
+       throws IOException {
+     assert fsn.hasWriteLock();
+-    BlockInfo b = addBlock(fsn.dir, src, inodesInPath, newBlock,
+-                                     targets);
++    BlockInfo b = addBlock(fsn.dir, src, inodesInPath, newBlock, targets,
++        isStriped);
+     NameNode.stateChangeLog.info("BLOCK* allocate " + b + " for " + src);
+     DatanodeStorageInfo.incrementBlocksScheduled(targets);
+   }
+@@ -853,17 +882,19 @@ private static void setNewINodeStoragePolicy(BlockManager bm, INodeFile
+ 
+   static class ValidateAddBlockResult {
+     final long blockSize;
+-    final int replication;
++    final int numTargets;
+     final byte storagePolicyID;
+     final String clientMachine;
++    final boolean isStriped;
+ 
+     ValidateAddBlockResult(
+-        long blockSize, int replication, byte storagePolicyID,
+-        String clientMachine) {
++        long blockSize, int numTargets, byte storagePolicyID,
++        String clientMachine, boolean isStriped) {
+       this.blockSize = blockSize;
+-      this.replication = replication;
++      this.numTargets = numTargets;
+       this.storagePolicyID = storagePolicyID;
+       this.clientMachine = clientMachine;
++      this.isStriped = isStriped;
+     }
+   }
+ 
