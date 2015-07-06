@@ -854,3 +854,239 @@ index 4266004..0a2f15b 100644
          //check block invalidation
          Block[] blks = nodeinfo.getInvalidateBlocks(blockInvalidateLimit);
          if (blks != null) {
+diff --git a/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/protocol/BlockECRecoveryCommand.java b/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/protocol/BlockECRecoveryCommand.java
+new file mode 100644
+index 0000000..56a1546
+--- /dev/null
++++ b/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/protocol/BlockECRecoveryCommand.java
+@@ -0,0 +1,153 @@
++/**
++ * Licensed to the Apache Software Foundation (ASF) under one
++ * or more contributor license agreements.  See the NOTICE file
++ * distributed with this work for additional information
++ * regarding copyright ownership.  The ASF licenses this file
++ * to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance
++ * with the License.  You may obtain a copy of the License at
++ *
++ *     http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package org.apache.hadoop.hdfs.server.protocol;
++
++import com.google.common.base.Joiner;
++
++import org.apache.hadoop.classification.InterfaceAudience;
++import org.apache.hadoop.classification.InterfaceStability;
++import org.apache.hadoop.fs.StorageType;
++import org.apache.hadoop.hdfs.protocol.DatanodeInfo;
++import org.apache.hadoop.hdfs.protocol.ExtendedBlock;
++import org.apache.hadoop.hdfs.server.blockmanagement.DatanodeStorageInfo;
++import org.apache.hadoop.io.erasurecode.ECSchema;
++
++import java.util.Arrays;
++import java.util.Collection;
++
++/**
++ * A BlockECRecoveryCommand is an instruction to a DataNode to reconstruct a
++ * striped block group with missing blocks.
++ *
++ * Upon receiving this command, the DataNode pulls data from other DataNodes
++ * hosting blocks in this group and reconstructs the lost blocks through codec
++ * calculation.
++ *
++ * After the reconstruction, the DataNode pushes the reconstructed blocks to
++ * their final destinations if necessary (e.g., the destination is different
++ * from the reconstruction node, or multiple blocks in a group are to be
++ * reconstructed).
++ */
++@InterfaceAudience.Private
++@InterfaceStability.Evolving
++public class BlockECRecoveryCommand extends DatanodeCommand {
++  final Collection<BlockECRecoveryInfo> ecTasks;
++
++  /**
++   * Create BlockECRecoveryCommand from a collection of
++   * {@link BlockECRecoveryInfo}, each representing a recovery task
++   */
++  public BlockECRecoveryCommand(int action,
++      Collection<BlockECRecoveryInfo> blockECRecoveryInfoList) {
++    super(action);
++    this.ecTasks = blockECRecoveryInfoList;
++  }
++
++  @Override
++  public String toString() {
++    StringBuilder sb = new StringBuilder();
++    sb.append("BlockECRecoveryCommand(\n  ");
++    Joiner.on("\n  ").appendTo(sb, ecTasks);
++    sb.append("\n)");
++    return sb.toString();
++  }
++
++  /** Block and targets pair */
++  @InterfaceAudience.Private
++  @InterfaceStability.Evolving
++  public static class BlockECRecoveryInfo {
++    private final ExtendedBlock block;
++    private final DatanodeInfo[] sources;
++    private DatanodeInfo[] targets;
++    private String[] targetStorageIDs;
++    private StorageType[] targetStorageTypes;
++    private final short[] liveBlockIndices;
++    private final ECSchema ecSchema;
++    private final int cellSize;
++
++    public BlockECRecoveryInfo(ExtendedBlock block, DatanodeInfo[] sources,
++        DatanodeStorageInfo[] targetDnStorageInfo, short[] liveBlockIndices,
++        ECSchema ecSchema, int cellSize) {
++      this(block, sources, DatanodeStorageInfo
++          .toDatanodeInfos(targetDnStorageInfo), DatanodeStorageInfo
++          .toStorageIDs(targetDnStorageInfo), DatanodeStorageInfo
++          .toStorageTypes(targetDnStorageInfo), liveBlockIndices, ecSchema,
++          cellSize);
++    }
++
++    public BlockECRecoveryInfo(ExtendedBlock block, DatanodeInfo[] sources,
++        DatanodeInfo[] targets, String[] targetStorageIDs,
++        StorageType[] targetStorageTypes, short[] liveBlockIndices,
++        ECSchema ecSchema, int cellSize) {
++      this.block = block;
++      this.sources = sources;
++      this.targets = targets;
++      this.targetStorageIDs = targetStorageIDs;
++      this.targetStorageTypes = targetStorageTypes;
++      this.liveBlockIndices = liveBlockIndices;
++      this.ecSchema = ecSchema;
++      this.cellSize = cellSize;
++    }
++
++    public ExtendedBlock getExtendedBlock() {
++      return block;
++    }
++
++    public DatanodeInfo[] getSourceDnInfos() {
++      return sources;
++    }
++
++    public DatanodeInfo[] getTargetDnInfos() {
++      return targets;
++    }
++
++    public String[] getTargetStorageIDs() {
++      return targetStorageIDs;
++    }
++    
++    public StorageType[] getTargetStorageTypes() {
++      return targetStorageTypes;
++    }
++
++    public short[] getLiveBlockIndices() {
++      return liveBlockIndices;
++    }
++    
++    public ECSchema getECSchema() {
++      return ecSchema;
++    }
++
++    public int getCellSize() {
++      return cellSize;
++    }
++
++    @Override
++    public String toString() {
++      return new StringBuilder().append("BlockECRecoveryInfo(\n  ")
++          .append("Recovering ").append(block).append(" From: ")
++          .append(Arrays.asList(sources)).append(" To: [")
++          .append(Arrays.asList(targets)).append(")\n")
++          .append(" Block Indices: ").append(Arrays.asList(liveBlockIndices))
++          .toString();
++    }
++  }
++
++  public Collection<BlockECRecoveryInfo> getECTasks() {
++    return this.ecTasks;
++  }
++}
+diff --git a/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/protocol/DatanodeProtocol.java b/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/protocol/DatanodeProtocol.java
+index dfe0813..add4e73 100644
+--- a/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/protocol/DatanodeProtocol.java
++++ b/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/protocol/DatanodeProtocol.java
+@@ -76,6 +76,7 @@
+   final static int DNA_BALANCERBANDWIDTHUPDATE = 8; // update balancer bandwidth
+   final static int DNA_CACHE = 9;      // cache blocks
+   final static int DNA_UNCACHE = 10;   // uncache blocks
++  final static int DNA_ERASURE_CODING_RECOVERY = 11; // erasure coding recovery command
+ 
+   /** 
+    * Register Datanode.
+diff --git a/hadoop-hdfs-project/hadoop-hdfs/src/main/proto/DatanodeProtocol.proto b/hadoop-hdfs-project/hadoop-hdfs/src/main/proto/DatanodeProtocol.proto
+index b87e753..9d24b91 100644
+--- a/hadoop-hdfs-project/hadoop-hdfs/src/main/proto/DatanodeProtocol.proto
++++ b/hadoop-hdfs-project/hadoop-hdfs/src/main/proto/DatanodeProtocol.proto
+@@ -33,6 +33,7 @@ package hadoop.hdfs.datanode;
+ 
+ import "HAServiceProtocol.proto";
+ import "hdfs.proto";
++import "erasurecoding.proto";
+ 
+ /**
+  * Information to identify a datanode to a namenode
+@@ -58,6 +59,7 @@ message DatanodeCommandProto {
+     UnusedUpgradeCommand = 6;
+     NullDatanodeCommand = 7;
+     BlockIdCommand = 8;
++    BlockECRecoveryCommand = 9;
+   }
+ 
+   required Type cmdType = 1;    // Type of the command
+@@ -71,6 +73,7 @@ message DatanodeCommandProto {
+   optional KeyUpdateCommandProto keyUpdateCmd = 6;
+   optional RegisterCommandProto registerCmd = 7;
+   optional BlockIdCommandProto blkIdCmd = 8;
++  optional BlockECRecoveryCommandProto blkECRecoveryCmd = 9;
+ }
+ 
+ /**
+@@ -145,6 +148,13 @@ message RegisterCommandProto {
+ }
+ 
+ /**
++ * Block Erasure coding recovery command
++ */
++message BlockECRecoveryCommandProto {
++  repeated BlockECRecoveryInfoProto blockECRecoveryinfo = 1;
++}
++
++/**
+  * registration - Information of the datanode registering with the namenode
+  */
+ message RegisterDatanodeRequestProto {
+diff --git a/hadoop-hdfs-project/hadoop-hdfs/src/main/proto/erasurecoding.proto b/hadoop-hdfs-project/hadoop-hdfs/src/main/proto/erasurecoding.proto
+index e656659..afdfd05 100644
+--- a/hadoop-hdfs-project/hadoop-hdfs/src/main/proto/erasurecoding.proto
++++ b/hadoop-hdfs-project/hadoop-hdfs/src/main/proto/erasurecoding.proto
+@@ -55,3 +55,17 @@ message GetErasureCodingZoneRequestProto {
+ message GetErasureCodingZoneResponseProto {
+   optional ErasureCodingZoneProto ECZone = 1;
+ }
++
++/**
++ * Block erasure coding recovery info
++ */
++message BlockECRecoveryInfoProto {
++  required ExtendedBlockProto block = 1;
++  required DatanodeInfosProto sourceDnInfos = 2;
++  required DatanodeInfosProto targetDnInfos = 3;
++  required StorageUuidsProto targetStorageUuids = 4;
++  required StorageTypesProto targetStorageTypes = 5;
++  repeated uint32 liveBlockIndices = 6;
++  required ECSchemaProto ecSchema = 7;
++  required uint32 cellSize = 8;
++}
+\ No newline at end of file

@@ -322,3 +322,35 @@ index d90751c..b25a7c5 100644
        FileUnderConstructionFeature uc = n.getFileUnderConstructionFeature();
        if (uc != null) {
          INodeSection.FileUnderConstructionFeature f =
+diff --git a/hadoop-hdfs-project/hadoop-hdfs/src/main/proto/fsimage.proto b/hadoop-hdfs-project/hadoop-hdfs/src/main/proto/fsimage.proto
+index 3bd1d91..5bb1c32 100644
+--- a/hadoop-hdfs-project/hadoop-hdfs/src/main/proto/fsimage.proto
++++ b/hadoop-hdfs-project/hadoop-hdfs/src/main/proto/fsimage.proto
+@@ -73,6 +73,7 @@ message NameSystemSection {
+   optional uint64 lastAllocatedBlockId = 5;
+   optional uint64 transactionId = 6;
+   optional uint64 rollingUpgradeStartTime = 7;
++  optional uint64 lastAllocatedStripedBlockId = 8;
+ }
+ 
+ /**
+@@ -91,6 +92,11 @@ message INodeSection {
+     optional string clientMachine = 2;
+   }
+ 
++  message StripedBlocksFeature {
++    // store striped blocks related information
++    optional uint32 cellSize = 1;
++  }
++
+   message AclFeatureProto {
+     /**
+      * An ACL entry is represented by a 32-bit integer in Big Endian
+@@ -139,6 +145,7 @@ message INodeSection {
+     optional AclFeatureProto acl = 8;
+     optional XAttrFeatureProto xAttrs = 9;
+     optional uint32 storagePolicyID = 10;
++    optional StripedBlocksFeature stripedBlocks = 11;
+   }
+ 
+   message QuotaByStorageTypeEntryProto {

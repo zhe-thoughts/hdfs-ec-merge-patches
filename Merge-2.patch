@@ -132,7 +132,7 @@ index ac19d44..a6c7b10 100644
      this.snapshotQuota = snapshotQuota;
      this.parentFullPath = parentFullPath;
 diff --git a/hadoop-hdfs-project/hadoop-hdfs-client/src/main/java/org/apache/hadoop/hdfs/web/JsonUtilClient.java b/hadoop-hdfs-project/hadoop-hdfs-client/src/main/java/org/apache/hadoop/hdfs/web/JsonUtilClient.java
-index e025e31..016bb8b 100644
+index 713836c..eeadd73 100644
 --- a/hadoop-hdfs-project/hadoop-hdfs-client/src/main/java/org/apache/hadoop/hdfs/web/JsonUtilClient.java
 +++ b/hadoop-hdfs-project/hadoop-hdfs-client/src/main/java/org/apache/hadoop/hdfs/web/JsonUtilClient.java
 @@ -132,7 +132,7 @@ static HdfsFileStatus toFileStatus(final Map<?, ?> json, boolean includesType) {
@@ -144,7 +144,7 @@ index e025e31..016bb8b 100644
    }
  
    /** Convert a Json map to an ExtendedBlock object. */
-@@ -489,7 +489,7 @@ static LocatedBlocks toLocatedBlocks(
+@@ -503,7 +503,7 @@ static LocatedBlocks toLocatedBlocks(
          (Map<?, ?>) m.get("lastLocatedBlock"));
      final boolean isLastBlockComplete = (Boolean)m.get("isLastBlockComplete");
      return new LocatedBlocks(fileLength, isUnderConstruction, locatedBlocks,
@@ -409,6 +409,78 @@ index 84499bb..5a3c885 100644
 +    return dfs.getClient().getECSchemas();
 +  }
  }
+diff --git a/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/protocol/ErasureCodingZone.java b/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/protocol/ErasureCodingZone.java
+new file mode 100644
+index 0000000..655def3
+--- /dev/null
++++ b/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/protocol/ErasureCodingZone.java
+@@ -0,0 +1,66 @@
++/**
++ * Licensed to the Apache Software Foundation (ASF) under one or more
++ * contributor license agreements. See the NOTICE file distributed with this
++ * work for additional information regarding copyright ownership. The ASF
++ * licenses this file to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ * 
++ * http://www.apache.org/licenses/LICENSE-2.0
++ * 
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
++ * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
++ * License for the specific language governing permissions and limitations under
++ * the License.
++ */
++package org.apache.hadoop.hdfs.protocol;
++
++import org.apache.hadoop.io.erasurecode.ECSchema;
++
++/**
++ * Information about the EC Zone at the specified path.
++ */
++public class ErasureCodingZone {
++
++  private String dir;
++  private ECSchema schema;
++  private int cellSize;
++
++  public ErasureCodingZone(String dir, ECSchema schema, int cellSize) {
++    this.dir = dir;
++    this.schema = schema;
++    this.cellSize = cellSize;
++  }
++
++  /**
++   * Get directory of the EC zone.
++   * 
++   * @return
++   */
++  public String getDir() {
++    return dir;
++  }
++
++  /**
++   * Get the schema for the EC Zone
++   * 
++   * @return
++   */
++  public ECSchema getSchema() {
++    return schema;
++  }
++
++  /**
++   * Get cellSize for the EC Zone
++   */
++  public int getCellSize() {
++    return cellSize;
++  }
++
++  @Override
++  public String toString() {
++    return "Dir: " + getDir() + ", Schema: " + schema + ", cellSize: "
++        + cellSize;
++  }
++}
 diff --git a/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/protocol/HdfsLocatedFileStatus.java b/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/protocol/HdfsLocatedFileStatus.java
 index 23e8f57..4701538 100644
 --- a/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/protocol/HdfsLocatedFileStatus.java
@@ -1420,3 +1492,636 @@ index ccee1ae..2ee7c31 100644
    }
      
    FSNamesystem getFSNamesystem() {
+diff --git a/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/namenode/FSNamesystem.java b/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/namenode/FSNamesystem.java
+index 7c6d6a1..5830b45 100644
+--- a/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/namenode/FSNamesystem.java
++++ b/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/namenode/FSNamesystem.java
+@@ -177,6 +177,7 @@
+ import org.apache.hadoop.hdfs.protocol.DatanodeInfo;
+ import org.apache.hadoop.hdfs.protocol.DirectoryListing;
+ import org.apache.hadoop.hdfs.protocol.EncryptionZone;
++import org.apache.hadoop.hdfs.protocol.ErasureCodingZone;
+ import org.apache.hadoop.hdfs.protocol.ExtendedBlock;
+ import org.apache.hadoop.hdfs.protocol.HdfsConstants;
+ import org.apache.hadoop.hdfs.protocol.LastBlockWithStatus;
+@@ -253,6 +254,7 @@
+ import org.apache.hadoop.io.EnumSetWritable;
+ import org.apache.hadoop.io.IOUtils;
+ import org.apache.hadoop.io.Text;
++import org.apache.hadoop.io.erasurecode.ECSchema;
+ import org.apache.hadoop.ipc.RetriableException;
+ import org.apache.hadoop.ipc.RetryCache;
+ import org.apache.hadoop.ipc.Server;
+@@ -416,6 +418,7 @@ private void logAuditEvent(boolean succeeded,
+   private final BlockManager blockManager;
+   private final SnapshotManager snapshotManager;
+   private final CacheManager cacheManager;
++  private final ErasureCodingSchemaManager ecSchemaManager;
+   private final DatanodeStatistics datanodeStatistics;
+ 
+   private String nameserviceId;
+@@ -592,6 +595,7 @@ void clear() {
+     leaseManager.removeAllLeases();
+     snapshotManager.clearSnapshottableDirs();
+     cacheManager.clear();
++    ecSchemaManager.clear();
+     setImageLoaded(false);
+     blockManager.clear();
+   }
+@@ -829,6 +833,7 @@ static FSNamesystem loadFromDisk(Configuration conf) throws IOException {
+       this.dir = new FSDirectory(this, conf);
+       this.snapshotManager = new SnapshotManager(dir);
+       this.cacheManager = new CacheManager(this, conf, blockManager);
++      this.ecSchemaManager = new ErasureCodingSchemaManager();
+       this.safeMode = new SafeModeInfo(conf);
+       this.topConf = new TopConf(conf);
+       this.auditLoggers = initAuditLoggers(conf);
+@@ -6290,6 +6295,16 @@ public CacheManager getCacheManager() {
+     return cacheManager;
+   }
+ 
++  /** @return the ErasureCodingSchemaManager. */
++  public ErasureCodingSchemaManager getErasureCodingSchemaManager() {
++    return ecSchemaManager;
++  }
++
++  /** @return the ErasureCodingZoneManager. */
++  public ErasureCodingZoneManager getErasureCodingZoneManager() {
++    return dir.ecZoneManager;
++  }
++
+   @Override  // NameNodeMXBean
+   public String getCorruptFiles() {
+     List<String> list = new ArrayList<String>();
+@@ -7326,6 +7341,85 @@ void checkAccess(String src, FsAction mode) throws IOException {
+   }
+ 
+   /**
++   * Create an erasure coding zone on directory src.
++   * @param srcArg  the path of a directory which will be the root of the
++   *                erasure coding zone. The directory must be empty.
++   * @param schema  ECSchema for the erasure coding zone
++   * @param cellSize Cell size of stripe
++   * @throws AccessControlException  if the caller is not the superuser.
++   * @throws UnresolvedLinkException if the path can't be resolved.
++   * @throws SafeModeException       if the Namenode is in safe mode.
++   */
++  void createErasureCodingZone(final String srcArg, final ECSchema schema,
++      int cellSize, final boolean logRetryCache) throws IOException,
++      UnresolvedLinkException, SafeModeException, AccessControlException {
++    checkSuperuserPrivilege();
++    checkOperation(OperationCategory.WRITE);
++    HdfsFileStatus resultingStat = null;
++    boolean success = false;
++    writeLock();
++    try {
++      checkOperation(OperationCategory.WRITE);
++      checkNameNodeSafeMode("Cannot create erasure coding zone on " + srcArg);
++      resultingStat = FSDirErasureCodingOp.createErasureCodingZone(this,
++          srcArg, schema, cellSize, logRetryCache);
++      success = true;
++    } finally {
++      writeUnlock();
++      if (success) {
++        getEditLog().logSync();
++      }
++      logAuditEvent(success, "createErasureCodingZone", srcArg, null,
++          resultingStat);
++    }
++  }
++
++  /**
++   * Get the erasure coding zone information for specified path
++   */
++  ErasureCodingZone getErasureCodingZone(String src)
++      throws AccessControlException, UnresolvedLinkException, IOException {
++    checkOperation(OperationCategory.READ);
++    readLock();
++    try {
++      checkOperation(OperationCategory.READ);
++      return getErasureCodingZoneForPath(src);
++    } finally {
++      readUnlock();
++    }
++  }
++
++  /**
++   * Get available erasure coding schemas
++   */
++  ECSchema[] getErasureCodingSchemas() throws IOException {
++    checkOperation(OperationCategory.READ);
++    waitForLoadingFSImage();
++    readLock();
++    try {
++      checkOperation(OperationCategory.READ);
++      return FSDirErasureCodingOp.getErasureCodingSchemas(this);
++    } finally {
++      readUnlock();
++    }
++  }
++
++  /**
++   * Get the ECSchema specified by the name
++   */
++  ECSchema getErasureCodingSchema(String schemaName) throws IOException {
++    checkOperation(OperationCategory.READ);
++    waitForLoadingFSImage();
++    readLock();
++    try {
++      checkOperation(OperationCategory.READ);
++      return FSDirErasureCodingOp.getErasureCodingSchema(this, schemaName);
++    } finally {
++      readUnlock();
++    }
++  }
++
++  /**
+    * Default AuditLogger implementation; used when no access logger is
+    * defined in the config file. It can also be explicitly listed in the
+    * config file.
+@@ -7417,5 +7511,10 @@ private static void enableAsyncAuditLog() {
+     }
+   }
+ 
++  @Override
++  public ErasureCodingZone getErasureCodingZoneForPath(String src)
++      throws IOException {
++    return FSDirErasureCodingOp.getErasureCodingZone(this, src);
++  }
+ }
+ 
+diff --git a/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/namenode/NameNodeRpcServer.java b/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/namenode/NameNodeRpcServer.java
+index 52aaabd..957c4e7 100644
+--- a/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/namenode/NameNodeRpcServer.java
++++ b/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/namenode/NameNodeRpcServer.java
+@@ -84,6 +84,7 @@
+ import org.apache.hadoop.hdfs.protocol.DatanodeID;
+ import org.apache.hadoop.hdfs.protocol.DatanodeInfo;
+ import org.apache.hadoop.hdfs.protocol.DirectoryListing;
++import org.apache.hadoop.hdfs.protocol.ErasureCodingZone;
+ import org.apache.hadoop.hdfs.protocol.EncryptionZone;
+ import org.apache.hadoop.hdfs.protocol.ExtendedBlock;
+ import org.apache.hadoop.hdfs.protocol.FSLimitException;
+@@ -143,6 +144,7 @@
+ import org.apache.hadoop.hdfs.server.protocol.VolumeFailureSummary;
+ import org.apache.hadoop.io.EnumSetWritable;
+ import org.apache.hadoop.io.Text;
++import org.apache.hadoop.io.erasurecode.ECSchema;
+ import org.apache.hadoop.ipc.ProtobufRpcEngine;
+ import org.apache.hadoop.ipc.RPC;
+ import org.apache.hadoop.ipc.RetriableException;
+@@ -1841,6 +1843,24 @@ public EncryptionZone getEZForPath(String src)
+   }
+ 
+   @Override // ClientProtocol
++  public void createErasureCodingZone(String src, ECSchema schema, int cellSize)
++      throws IOException {
++    checkNNStartup();
++    final CacheEntry cacheEntry = RetryCache.waitForCompletion(retryCache);
++    if (cacheEntry != null && cacheEntry.isSuccess()) {
++      return;
++    }
++    boolean success = false;
++    try {
++      namesystem.createErasureCodingZone(src, schema, cellSize,
++          cacheEntry != null);
++      success = true;
++    } finally {
++      RetryCache.setState(cacheEntry, success);
++    }
++  }
++
++  @Override // ClientProtocol
+   public void setXAttr(String src, XAttr xAttr, EnumSet<XAttrSetFlag> flag)
+       throws IOException {
+     checkNNStartup();
+@@ -2035,4 +2055,16 @@ public void removeSpanReceiver(long id) throws IOException {
+     namesystem.checkSuperuserPrivilege();
+     nn.spanReceiverHost.removeSpanReceiver(id);
+   }
++
++  @Override // ClientProtocol
++  public ECSchema[] getECSchemas() throws IOException {
++    checkNNStartup();
++    return namesystem.getErasureCodingSchemas();
++  }
++
++  @Override // ClientProtocol
++  public ErasureCodingZone getErasureCodingZone(String src) throws IOException {
++    checkNNStartup();
++    return namesystem.getErasureCodingZone(src);
++  }
+ }
+diff --git a/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/namenode/Namesystem.java b/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/namenode/Namesystem.java
+index 1732865..5f364ae 100644
+--- a/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/namenode/Namesystem.java
++++ b/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/namenode/Namesystem.java
+@@ -19,12 +19,15 @@
+ 
+ import org.apache.hadoop.classification.InterfaceAudience;
+ import org.apache.hadoop.hdfs.protocol.Block;
++import org.apache.hadoop.hdfs.protocol.ErasureCodingZone;
+ import org.apache.hadoop.hdfs.server.blockmanagement.BlockInfoUnderConstruction;
+ import org.apache.hadoop.hdfs.server.namenode.NameNode.OperationCategory;
+ import org.apache.hadoop.hdfs.util.RwLock;
+ import org.apache.hadoop.ipc.StandbyException;
+ import org.apache.hadoop.security.AccessControlException;
+ 
++import java.io.IOException;
++
+ /** Namesystem operations. */
+ @InterfaceAudience.Private
+ public interface Namesystem extends RwLock, SafeMode {
+@@ -48,4 +51,14 @@
+   boolean isInSnapshot(BlockInfoUnderConstruction blockUC);
+ 
+   CacheManager getCacheManager();
++
++  /**
++   * Gets the ECZone for path
++   * @param src
++   *          - path
++   * @return {@link ErasureCodingZone}
++   * @throws IOException
++   */
++  public ErasureCodingZone getErasureCodingZoneForPath(String src)
++      throws IOException;
+ }
+\ No newline at end of file
+diff --git a/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/tools/erasurecode/ECCli.java b/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/tools/erasurecode/ECCli.java
+new file mode 100644
+index 0000000..4ed9d0a
+--- /dev/null
++++ b/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/tools/erasurecode/ECCli.java
+@@ -0,0 +1,48 @@
++/**
++ * Licensed to the Apache Software Foundation (ASF) under one or more
++ * contributor license agreements. See the NOTICE file distributed with this
++ * work for additional information regarding copyright ownership. The ASF
++ * licenses this file to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ * 
++ * http://www.apache.org/licenses/LICENSE-2.0
++ * 
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
++ * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
++ * License for the specific language governing permissions and limitations under
++ * the License.
++ */
++package org.apache.hadoop.hdfs.tools.erasurecode;
++
++import org.apache.hadoop.conf.Configuration;
++import org.apache.hadoop.fs.FsShell;
++import org.apache.hadoop.fs.shell.CommandFactory;
++import org.apache.hadoop.hdfs.HdfsConfiguration;
++import org.apache.hadoop.util.ToolRunner;
++
++/**
++ * CLI for the erasure code encoding operations.
++ */
++public class ECCli extends FsShell {
++
++  private final static String usagePrefix =
++      "Usage: hdfs erasurecode [generic options]";
++
++  @Override
++  protected String getUsagePrefix() {
++    return usagePrefix;
++  }
++
++  @Override
++  protected void registerCommands(CommandFactory factory) {
++    factory.registerCommands(ECCommand.class);
++  }
++
++  public static void main(String[] args) throws Exception {
++    Configuration conf = new HdfsConfiguration();
++    int res = ToolRunner.run(conf, new ECCli(), args);
++    System.exit(res);
++  }
++}
+\ No newline at end of file
+diff --git a/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/tools/erasurecode/ECCommand.java b/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/tools/erasurecode/ECCommand.java
+new file mode 100644
+index 0000000..03026d8
+--- /dev/null
++++ b/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/tools/erasurecode/ECCommand.java
+@@ -0,0 +1,226 @@
++/**
++ * Licensed to the Apache Software Foundation (ASF) under one or more
++ * contributor license agreements. See the NOTICE file distributed with this
++ * work for additional information regarding copyright ownership. The ASF
++ * licenses this file to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ * 
++ * http://www.apache.org/licenses/LICENSE-2.0
++ * 
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
++ * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
++ * License for the specific language governing permissions and limitations under
++ * the License.
++ */
++package org.apache.hadoop.hdfs.tools.erasurecode;
++
++import java.io.IOException;
++import java.util.ArrayList;
++import java.util.LinkedList;
++import java.util.List;
++
++import org.apache.hadoop.HadoopIllegalArgumentException;
++import org.apache.hadoop.classification.InterfaceAudience;
++import org.apache.hadoop.classification.InterfaceStability;
++import org.apache.hadoop.fs.FileSystem;
++import org.apache.hadoop.fs.Path;
++import org.apache.hadoop.fs.shell.Command;
++import org.apache.hadoop.fs.shell.CommandFactory;
++import org.apache.hadoop.fs.shell.PathData;
++import org.apache.hadoop.hdfs.DistributedFileSystem;
++import org.apache.hadoop.hdfs.protocol.ErasureCodingZone;
++import org.apache.hadoop.hdfs.protocol.HdfsConstants;
++import org.apache.hadoop.hdfs.server.namenode.UnsupportedActionException;
++import org.apache.hadoop.io.erasurecode.ECSchema;
++import org.apache.hadoop.util.StringUtils;
++
++/**
++ * Erasure Coding CLI commands
++ */
++@InterfaceAudience.Private
++@InterfaceStability.Evolving
++public abstract class ECCommand extends Command {
++
++  public static void registerCommands(CommandFactory factory) {
++    // Register all commands of Erasure CLI, with a '-' at the beginning in name
++    // of the command.
++    factory.addClass(CreateECZoneCommand.class, "-" + CreateECZoneCommand.NAME);
++    factory.addClass(GetECZoneCommand.class, "-"
++        + GetECZoneCommand.NAME);
++    factory.addClass(ListECSchemas.class, "-" + ListECSchemas.NAME);
++  }
++
++  @Override
++  public String getCommandName() {
++    return getName();
++  }
++
++  @Override
++  protected void run(Path path) throws IOException {
++    throw new RuntimeException("Not suppose to get here");
++  }
++
++  @Deprecated
++  @Override
++  public int runAll() {
++    return run(args);
++  }
++
++  @Override
++  protected void processPath(PathData item) throws IOException {
++    if (!(item.fs instanceof DistributedFileSystem)) {
++      throw new UnsupportedActionException(
++          "Erasure commands are only supported for the HDFS paths");
++    }
++  }
++
++  /**
++   * Create EC encoding zone command. Zones are created to use specific EC
++   * encoding schema, other than default while encoding the files under some
++   * specific directory.
++   */
++  static class CreateECZoneCommand extends ECCommand {
++    public static final String NAME = "createZone";
++    public static final String USAGE = "[-s <schemaName>] [-c <cellSize>] <path>";
++    public static final String DESCRIPTION = 
++        "Create a zone to encode files using a specified schema\n"
++        + "Options :\n"
++        + "  -s <schemaName> : EC schema name to encode files. "
++        + "If not passed default schema will be used\n"
++        + "  -c <cellSize> : cell size to use for striped encoding files."
++        + " If not passed default cellsize of "
++        + HdfsConstants.BLOCK_STRIPED_CELL_SIZE + " will be used\n"
++        + "  <path>  : Path to an empty directory. Under this directory "
++        + "files will be encoded using specified schema";
++    private String schemaName;
++    private int cellSize = 0;
++    private ECSchema schema = null;
++
++    @Override
++    protected void processOptions(LinkedList<String> args) throws IOException {
++      schemaName = StringUtils.popOptionWithArgument("-s", args);
++      String cellSizeStr = StringUtils.popOptionWithArgument("-c", args);
++      if (cellSizeStr != null) {
++        cellSize = (int) StringUtils.TraditionalBinaryPrefix
++            .string2long(cellSizeStr);
++      }
++      if (args.isEmpty()) {
++        throw new HadoopIllegalArgumentException("<path> is missing");
++      }
++      if (args.size() > 1) {
++        throw new HadoopIllegalArgumentException("Too many arguments");
++      }
++    }
++
++    @Override
++    protected void processPath(PathData item) throws IOException {
++      super.processPath(item);
++      DistributedFileSystem dfs = (DistributedFileSystem) item.fs;
++      try {
++        if (schemaName != null) {
++          ECSchema[] ecSchemas = dfs.getClient().getECSchemas();
++          for (ECSchema ecSchema : ecSchemas) {
++            if (schemaName.equals(ecSchema.getSchemaName())) {
++              schema = ecSchema;
++              break;
++            }
++          }
++          if (schema == null) {
++            StringBuilder sb = new StringBuilder();
++            sb.append("Schema '");
++            sb.append(schemaName);
++            sb.append("' does not match any of the supported schemas.");
++            sb.append(" Please select any one of ");
++            List<String> schemaNames = new ArrayList<String>();
++            for (ECSchema ecSchema : ecSchemas) {
++              schemaNames.add(ecSchema.getSchemaName());
++            }
++            sb.append(schemaNames);
++            throw new HadoopIllegalArgumentException(sb.toString());
++          }
++        }
++        dfs.createErasureCodingZone(item.path, schema, cellSize);
++        out.println("EC Zone created successfully at " + item.path);
++      } catch (IOException e) {
++        throw new IOException("Unable to create EC zone for the path "
++            + item.path + ". " + e.getMessage());
++      }
++    }
++  }
++
++  /**
++   * Get the information about the zone
++   */
++  static class GetECZoneCommand extends ECCommand {
++    public static final String NAME = "getZone";
++    public static final String USAGE = "<path>";
++    public static final String DESCRIPTION =
++        "Get information about the EC zone at specified path\n";
++
++    @Override
++    protected void processOptions(LinkedList<String> args) throws IOException {
++      if (args.isEmpty()) {
++        throw new HadoopIllegalArgumentException("<path> is missing");
++      }
++      if (args.size() > 1) {
++        throw new HadoopIllegalArgumentException("Too many arguments");
++      }
++    }
++
++    @Override
++    protected void processPath(PathData item) throws IOException {
++      super.processPath(item);
++      DistributedFileSystem dfs = (DistributedFileSystem) item.fs;
++      try {
++        ErasureCodingZone ecZone = dfs.getErasureCodingZone(item.path);
++        if (ecZone != null) {
++          out.println(ecZone.toString());
++        } else {
++          out.println("Path " + item.path + " is not in EC zone");
++        }
++      } catch (IOException e) {
++        throw new IOException("Unable to get EC zone for the path "
++            + item.path + ". " + e.getMessage());
++      }
++    }
++  }
++
++  /**
++   * List all supported EC Schemas
++   */
++  static class ListECSchemas extends ECCommand {
++    public static final String NAME = "listSchemas";
++    public static final String USAGE = "";
++    public static final String DESCRIPTION = 
++        "Get the list of ECSchemas supported\n";
++
++    @Override
++    protected void processOptions(LinkedList<String> args) throws IOException {
++      if (!args.isEmpty()) {
++        throw new HadoopIllegalArgumentException("Too many parameters");
++      }
++
++      FileSystem fs = FileSystem.get(getConf());
++      if (fs instanceof DistributedFileSystem == false) {
++        throw new UnsupportedActionException(
++            "Erasure commands are only supported for the HDFS");
++      }
++      DistributedFileSystem dfs = (DistributedFileSystem) fs;
++
++      ECSchema[] ecSchemas = dfs.getClient().getECSchemas();
++      StringBuilder sb = new StringBuilder();
++      int i = 0;
++      while (i < ecSchemas.length) {
++        ECSchema ecSchema = ecSchemas[i];
++        sb.append(ecSchema.getSchemaName());
++        i++;
++        if (i < ecSchemas.length) {
++          sb.append(", ");
++        }
++      }
++      out.println(sb.toString());
++    }
++  }
++}
+diff --git a/hadoop-hdfs-project/hadoop-hdfs/src/main/proto/ClientNamenodeProtocol.proto b/hadoop-hdfs-project/hadoop-hdfs/src/main/proto/ClientNamenodeProtocol.proto
+index b44c556..2b64ca0 100644
+--- a/hadoop-hdfs-project/hadoop-hdfs/src/main/proto/ClientNamenodeProtocol.proto
++++ b/hadoop-hdfs-project/hadoop-hdfs/src/main/proto/ClientNamenodeProtocol.proto
+@@ -34,6 +34,7 @@ import "acl.proto";
+ import "xattr.proto";
+ import "encryption.proto";
+ import "inotify.proto";
++import "erasurecoding.proto";
+ 
+ /**
+  * The ClientNamenodeProtocol Service defines the interface between a client 
+@@ -856,8 +857,14 @@ service ClientNamenodeProtocol {
+       returns(ListEncryptionZonesResponseProto);
+   rpc getEZForPath(GetEZForPathRequestProto)
+       returns(GetEZForPathResponseProto);
++  rpc createErasureCodingZone(CreateErasureCodingZoneRequestProto)
++      returns(CreateErasureCodingZoneResponseProto);
+   rpc getCurrentEditLogTxid(GetCurrentEditLogTxidRequestProto)
+       returns(GetCurrentEditLogTxidResponseProto);
+   rpc getEditsFromTxid(GetEditsFromTxidRequestProto)
+       returns(GetEditsFromTxidResponseProto);
++  rpc getECSchemas(GetECSchemasRequestProto)
++      returns(GetECSchemasResponseProto);
++  rpc getErasureCodingZone(GetErasureCodingZoneRequestProto)
++      returns(GetErasureCodingZoneResponseProto);
+ }
+diff --git a/hadoop-hdfs-project/hadoop-hdfs/src/main/proto/erasurecoding.proto b/hadoop-hdfs-project/hadoop-hdfs/src/main/proto/erasurecoding.proto
+new file mode 100644
+index 0000000..e656659
+--- /dev/null
++++ b/hadoop-hdfs-project/hadoop-hdfs/src/main/proto/erasurecoding.proto
+@@ -0,0 +1,57 @@
++/**
++ * Licensed to the Apache Software Foundation (ASF) under one
++ * or more contributor license agreements.  See the NOTICE file
++ * distributed with this work for additional information
++ * regarding copyright ownership.  The ASF licenses this file
++ * to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance
++ * with the License.  You may obtain a copy of the License at
++ *
++ *     http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++option java_package = "org.apache.hadoop.hdfs.protocol.proto";
++option java_outer_classname = "ErasureCodingProtos";
++option java_generate_equals_and_hash = true;
++package hadoop.hdfs;
++
++import "hdfs.proto";
++
++/**
++ * ErasureCodingZone
++ */
++message ErasureCodingZoneProto {
++  required string dir = 1;
++  required ECSchemaProto schema = 2;
++  required uint32 cellSize = 3;
++}
++
++message CreateErasureCodingZoneRequestProto {
++  required string src = 1;
++  optional ECSchemaProto schema = 2;
++  optional uint32 cellSize = 3;
++}
++
++message CreateErasureCodingZoneResponseProto {
++}
++
++message GetECSchemasRequestProto { // void request
++}
++
++message GetECSchemasResponseProto {
++  repeated ECSchemaProto schemas = 1;
++}
++
++message GetErasureCodingZoneRequestProto {
++  required string src = 1; // path to get the zone info
++}
++
++message GetErasureCodingZoneResponseProto {
++  optional ErasureCodingZoneProto ECZone = 1;
++}

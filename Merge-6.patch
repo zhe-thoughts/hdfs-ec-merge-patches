@@ -602,10 +602,24 @@ index 9781e09..629da0b 100644
  
      private final BlockInfo block;
 diff --git a/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/namenode/FSDirStatAndListingOp.java b/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/namenode/FSDirStatAndListingOp.java
-index 23261a1..c7242d0 100644
+index 23261a1..c5b6845 100644
 --- a/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/namenode/FSDirStatAndListingOp.java
 +++ b/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/namenode/FSDirStatAndListingOp.java
-@@ -518,9 +518,12 @@ private static HdfsLocatedFileStatus createLocatedFileStatus(
+@@ -185,9 +185,12 @@ static GetBlockLocationsResult getBlockLocations(
+       final FileEncryptionInfo feInfo = isReservedName ? null
+           : fsd.getFileEncryptionInfo(inode, iip.getPathSnapshotId(), iip);
+ 
++      final ErasureCodingZone ecZone = FSDirErasureCodingOp.getErasureCodingZone(
++          fsd.getFSNamesystem(), iip);
++
+       final LocatedBlocks blocks = bm.createLocatedBlocks(
+           inode.getBlocks(iip.getPathSnapshotId()), fileSize, isUc, offset,
+-          length, needBlockToken, iip.isSnapshot(), feInfo);
++          length, needBlockToken, iip.isSnapshot(), feInfo, ecZone);
+ 
+       // Set caching information for the located blocks.
+       for (LocatedBlock lb : blocks.getLocatedBlocks()) {
+@@ -518,9 +521,12 @@ private static HdfsLocatedFileStatus createLocatedFileStatus(
        final long fileSize = !inSnapshot && isUc ?
            fileNode.computeFileSizeNotIncludingLastUcBlock() : size;
  
@@ -619,7 +633,7 @@ index 23261a1..c7242d0 100644
        if (loc == null) {
          loc = new LocatedBlocks();
        }
-@@ -531,8 +534,6 @@ private static HdfsLocatedFileStatus createLocatedFileStatus(
+@@ -531,8 +537,6 @@ private static HdfsLocatedFileStatus createLocatedFileStatus(
      }
      int childrenNum = node.isDirectory() ?
          node.asDirectory().getChildrenNum(snapshot) : 0;
@@ -628,3 +642,31 @@ index 23261a1..c7242d0 100644
      final ECSchema schema = ecZone != null ? ecZone.getSchema() : null;
      final int cellSize = ecZone != null ? ecZone.getCellSize() : 0;
  
+diff --git a/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/namenode/FSNamesystem.java b/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/namenode/FSNamesystem.java
+index cd308c8..2762ca2 100644
+--- a/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/namenode/FSNamesystem.java
++++ b/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/namenode/FSNamesystem.java
+@@ -186,6 +186,7 @@
+ import org.apache.hadoop.hdfs.protocol.HdfsFileStatus;
+ import org.apache.hadoop.hdfs.protocol.LocatedBlock;
+ import org.apache.hadoop.hdfs.protocol.LocatedBlocks;
++import org.apache.hadoop.hdfs.protocol.LocatedStripedBlock;
+ import org.apache.hadoop.hdfs.protocol.QuotaExceededException;
+ import org.apache.hadoop.hdfs.protocol.RecoveryInProgressException;
+ import org.apache.hadoop.hdfs.protocol.RollingUpgradeException;
+@@ -1761,8 +1762,14 @@ LocatedBlocks getBlockLocations(String clientMachine, String srcArg,
+ 
+     LocatedBlocks blocks = res.blocks;
+     if (blocks != null) {
++      List<LocatedBlock> blkList = blocks.getLocatedBlocks();
++      if (blkList == null || blkList.size() == 0 ||
++          blkList.get(0) instanceof LocatedStripedBlock) {
++        // no need to sort locations for striped blocks
++        return blocks;
++      }
+       blockManager.getDatanodeManager().sortLocatedBlocks(
+-          clientMachine, blocks.getLocatedBlocks());
++          clientMachine, blkList);
+ 
+       // lastBlock is not part of getLocatedBlocks(), might need to sort it too
+       LocatedBlock lastBlock = blocks.getLastLocatedBlock();

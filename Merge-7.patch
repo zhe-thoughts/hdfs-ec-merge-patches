@@ -2916,3 +2916,43 @@ index a257e32..9aef436 100644
 -}
 \ No newline at end of file
 +}
+diff --git a/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/namenode/FSNamesystem.java b/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/namenode/FSNamesystem.java
+index 2762ca2..087e156 100644
+--- a/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/namenode/FSNamesystem.java
++++ b/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/namenode/FSNamesystem.java
+@@ -5523,11 +5523,17 @@ private void updatePipelineInternal(String clientName, ExtendedBlock oldBlock,
+         = (BlockInfoUnderConstruction)pendingFile.getLastBlock();
+ 
+     // check new GS & length: this is not expected
+-    if (newBlock.getGenerationStamp() <= blockinfo.getGenerationStamp() ||
+-        newBlock.getNumBytes() < blockinfo.getNumBytes()) {
+-      String msg = "Update " + oldBlock + " (len = " + 
+-        blockinfo.getNumBytes() + ") to an older state: " + newBlock + 
+-        " (len = " + newBlock.getNumBytes() +")";
++    if (newBlock.getGenerationStamp() <= blockinfo.getGenerationStamp()) {
++      final String msg = "Update " + oldBlock + " but the new block " + newBlock
++          + " does not have a larger generation stamp than the last block "
++          + blockinfo;
++      LOG.warn(msg);
++      throw new IOException(msg);
++    }
++    if (newBlock.getNumBytes() < blockinfo.getNumBytes()) {
++      final String msg = "Update " + oldBlock + " (size="
++          + oldBlock.getNumBytes() + ") to a smaller size block " + newBlock
++          + " (size=" + newBlock.getNumBytes() + ")";
+       LOG.warn(msg);
+       throw new IOException(msg);
+     }
+diff --git a/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/namenode/NameNodeRpcServer.java b/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/namenode/NameNodeRpcServer.java
+index 957c4e7..1037683 100644
+--- a/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/namenode/NameNodeRpcServer.java
++++ b/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/namenode/NameNodeRpcServer.java
+@@ -790,7 +790,7 @@ public void reportBadBlocks(LocatedBlock[] blocks) throws IOException {
+   public LocatedBlock updateBlockForPipeline(ExtendedBlock block, String clientName)
+       throws IOException {
+     checkNNStartup();
+-    return namesystem.updateBlockForPipeline(block, clientName);
++    return namesystem.bumpBlockGenerationStamp(block, clientName);
+   }
+ 
+ 

@@ -595,3 +595,46 @@ index 344b9fc..738899b 100644
 -}
 \ No newline at end of file
 +}
+diff --git a/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/protocol/BlocksWithLocations.java b/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/protocol/BlocksWithLocations.java
+index a985dbd..0507faf 100644
+--- a/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/protocol/BlocksWithLocations.java
++++ b/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/protocol/BlocksWithLocations.java
+@@ -17,6 +17,7 @@
+  */
+ package org.apache.hadoop.hdfs.server.protocol;
+ 
++import com.google.common.base.Preconditions;
+ import org.apache.hadoop.classification.InterfaceAudience;
+ import org.apache.hadoop.classification.InterfaceStability;
+ import org.apache.hadoop.fs.StorageType;
+@@ -91,6 +92,30 @@ private StringBuilder appendString(int i, StringBuilder b) {
+     }
+   }
+ 
++  public static class StripedBlockWithLocations extends BlockWithLocations {
++    final byte[] indices;
++    final short dataBlockNum;
++
++    public StripedBlockWithLocations(BlockWithLocations blk, byte[] indices,
++         short dataBlockNum) {
++      super(blk.getBlock(), blk.getDatanodeUuids(), blk.getStorageIDs(),
++          blk.getStorageTypes());
++      Preconditions.checkArgument(
++          blk.getDatanodeUuids().length == indices.length);
++      this.indices = indices;
++      this.dataBlockNum = dataBlockNum;
++
++    }
++
++    public byte[] getIndices() {
++      return indices;
++    }
++
++    public short getDataBlockNum() {
++      return dataBlockNum;
++    }
++  }
++
+   private final BlockWithLocations[] blocks;
+ 
+   /** Constructor with one parameter */

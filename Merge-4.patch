@@ -747,3 +747,78 @@ index 7c8a857..ef0cc1d 100644
            .setTransactionId(context.getTxId());
  
        // We use the non-locked version of getNamespaceInfo here since
+diff --git a/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/namenode/FSNamesystem.java b/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/namenode/FSNamesystem.java
+index 5830b45..545845e 100644
+--- a/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/namenode/FSNamesystem.java
++++ b/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/namenode/FSNamesystem.java
+@@ -4518,14 +4518,21 @@ private synchronized void setBlockTotal(int total) {
+         this.blockSafe = 0;
+       checkMode();
+     }
+-      
++
+     /**
+      * Increment number of safe blocks if current block has 
+      * reached minimal replication.
+-     * @param replication current replication 
++     * @param storageNum current number of replicas or number of internal blocks
++     *                   of a striped block group
++     * @param storedBlock current storedBlock which is either a
++     *                    BlockInfoContiguous or a BlockInfoStriped
+      */
+-    private synchronized void incrementSafeBlockCount(short replication) {
+-      if (replication == safeReplication) {
++    private synchronized void incrementSafeBlockCount(short storageNum,
++        BlockInfo storedBlock) {
++      final int safe = storedBlock.isStriped() ?
++          storedBlock.getStripedBlockStorageOp().getDataBlockNum() :
++          safeReplication;
++      if (storageNum == safe) {
+         this.blockSafe++;
+ 
+         // Report startup progress only if we haven't completed startup yet.
+@@ -4818,12 +4825,12 @@ private boolean shouldPopulateReplQueues() {
+   }
+ 
+   @Override
+-  public void incrementSafeBlockCount(int replication) {
++  public void incrementSafeBlockCount(int storageNum, BlockInfo storedBlock) {
+     // safeMode is volatile, and may be set to null at any time
+     SafeModeInfo safeMode = this.safeMode;
+     if (safeMode == null)
+       return;
+-    safeMode.incrementSafeBlockCount((short)replication);
++    safeMode.incrementSafeBlockCount((short) storageNum, storedBlock);
+   }
+ 
+   @Override
+@@ -5326,7 +5333,7 @@ long nextGenerationStamp(boolean legacyBlock)
+   private long nextBlockId() throws IOException {
+     assert hasWriteLock();
+     checkNameNodeSafeMode("Cannot get next block ID");
+-    final long blockId = blockIdManager.nextBlockId();
++    final long blockId = blockIdManager.nextContiguousBlockId();
+     getEditLog().logAllocateBlockId(blockId);
+     // NB: callers sync the log
+     return blockId;
+diff --git a/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/namenode/SafeMode.java b/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/namenode/SafeMode.java
+index 1428482..5078c44 100644
+--- a/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/namenode/SafeMode.java
++++ b/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/namenode/SafeMode.java
+@@ -41,12 +41,13 @@
+ 
+   /** Check whether replication queues are being populated. */
+   public boolean isPopulatingReplQueues();
+-    
++
+   /**
+    * Increment number of blocks that reached minimal replication.
+-   * @param replication current replication 
++   * @param replication current replication
++   * @param storedBlock current stored Block
+    */
+-  public void incrementSafeBlockCount(int replication);
++  public void incrementSafeBlockCount(int replication, BlockInfo storedBlock);
+ 
+   /** Decrement number of blocks that reached minimal replication. */
+   public void decrementSafeBlockCount(BlockInfo b);

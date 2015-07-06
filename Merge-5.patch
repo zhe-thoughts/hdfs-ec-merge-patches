@@ -271,3 +271,64 @@ index 9696179..86aaf79 100644
    /**
     * Adjust rackmap, moreThanOne, and exactlyOne after removing replica on cur.
     *
+diff --git a/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/namenode/FSNamesystem.java b/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/namenode/FSNamesystem.java
+index 545845e..cd308c8 100644
+--- a/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/namenode/FSNamesystem.java
++++ b/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/namenode/FSNamesystem.java
+@@ -2628,6 +2628,7 @@ LocatedBlock getAdditionalDatanode(String src, long fileId,
+     final long preferredblocksize;
+     final byte storagePolicyID;
+     final List<DatanodeStorageInfo> chosen;
++    final boolean isStriped = false;
+     checkOperation(OperationCategory.READ);
+     byte[][] pathComponents = FSDirectory.getPathComponentsForReservedPath(src);
+     FSPermissionChecker pc = getPermissionChecker();
+@@ -2669,7 +2670,7 @@ LocatedBlock getAdditionalDatanode(String src, long fileId,
+     // choose new datanodes.
+     final DatanodeStorageInfo[] targets = blockManager.chooseTarget4AdditionalDatanode(
+         src, numAdditionalNodes, clientnode, chosen, 
+-        excludes, preferredblocksize, storagePolicyID);
++        excludes, preferredblocksize, storagePolicyID, isStriped);
+     final LocatedBlock lb = BlockManager.newLocatedBlock(
+         blk, targets, -1, false);
+     blockManager.setBlockToken(lb, BlockTokenIdentifier.AccessMode.COPY);
+diff --git a/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/namenode/NamenodeFsck.java b/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/namenode/NamenodeFsck.java
+index ab179b4..cb6998b 100644
+--- a/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/namenode/NamenodeFsck.java
++++ b/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/namenode/NamenodeFsck.java
+@@ -66,7 +66,7 @@
+ import org.apache.hadoop.hdfs.server.blockmanagement.BlockCollection;
+ import org.apache.hadoop.hdfs.server.blockmanagement.BlockInfo;
+ import org.apache.hadoop.hdfs.server.blockmanagement.BlockManager;
+-import org.apache.hadoop.hdfs.server.blockmanagement.BlockPlacementPolicy;
++import org.apache.hadoop.hdfs.server.blockmanagement.BlockPlacementPolicies;
+ import org.apache.hadoop.hdfs.server.blockmanagement.BlockPlacementStatus;
+ import org.apache.hadoop.hdfs.server.blockmanagement.DatanodeDescriptor;
+ import org.apache.hadoop.hdfs.server.blockmanagement.DatanodeStorageInfo;
+@@ -170,7 +170,7 @@
+   private final PrintWriter out;
+   private List<String> snapshottableDirs = null;
+ 
+-  private final BlockPlacementPolicy bpPolicy;
++  private final BlockPlacementPolicies bpPolicies;
+   private StoragePolicySummary storageTypeSummary = null;
+ 
+   /**
+@@ -192,7 +192,7 @@
+     this.out = out;
+     this.totalDatanodes = totalDatanodes;
+     this.remoteAddress = remoteAddress;
+-    this.bpPolicy = BlockPlacementPolicy.getInstance(conf, null,
++    this.bpPolicies = new BlockPlacementPolicies(conf, null,
+         networktopology,
+         namenode.getNamesystem().getBlockManager().getDatanodeManager()
+         .getHost2DatanodeMap());
+@@ -601,7 +601,7 @@ private void collectBlocksSummary(String parent, HdfsFileStatus file, Result res
+       }
+ 
+       // count mis replicated blocks
+-      BlockPlacementStatus blockPlacementStatus = bpPolicy
++      BlockPlacementStatus blockPlacementStatus = bpPolicies.getPolicy(false)
+           .verifyBlockPlacement(path, lBlk, targetFileReplication);
+       if (!blockPlacementStatus.isPlacementPolicySatisfied()) {
+         res.numMisReplicatedBlocks++;
