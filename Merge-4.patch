@@ -438,6 +438,28 @@ index 0dbf485..00cea53 100644
      }
    }
    
+diff --git a/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/namenode/FSEditLogLoader.java b/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/namenode/FSEditLogLoader.java
+index f7f6e9c..22d6fd4 100644
+--- a/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/namenode/FSEditLogLoader.java
++++ b/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/namenode/FSEditLogLoader.java
+@@ -980,7 +980,7 @@ private void addNewBlock(FSDirectory fsDir, AddBlockOp op, INodeFile file)
+     // add the new block
+     BlockInfo newBI = new BlockInfoUnderConstructionContiguous(
+           newBlock, file.getPreferredBlockReplication());
+-    fsNamesys.getBlockManager().addBlockCollection(newBI, file);
++    fsNamesys.getBlockManager().addBlockCollectionWithCheck(newBI, file);
+     file.addBlock(newBI);
+     fsNamesys.getBlockManager().processQueuedMessagesForBlock(newBlock);
+   }
+@@ -1068,7 +1068,7 @@ private void updateBlocks(FSDirectory fsDir, BlockListUpdatingOp op,
+           newBI = new BlockInfoContiguous(newBlock,
+               file.getPreferredBlockReplication());
+         }
+-        fsNamesys.getBlockManager().addBlockCollection(newBI, file);
++        fsNamesys.getBlockManager().addBlockCollectionWithCheck(newBI, file);
+         file.addBlock(newBI);
+         fsNamesys.getBlockManager().processQueuedMessagesForBlock(newBlock);
+       }
 diff --git a/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/namenode/FSNamesystem.java b/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/namenode/FSNamesystem.java
 index b3cedbc..545845e 100644
 --- a/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/namenode/FSNamesystem.java
@@ -505,10 +527,10 @@ index 1428482..5078c44 100644
    /** Decrement number of blocks that reached minimal replication. */
    public void decrementSafeBlockCount(BlockInfo b);
 diff --git a/hadoop-hdfs-project/hadoop-hdfs/src/test/java/org/apache/hadoop/hdfs/server/blockmanagement/TestBlockInfoStriped.java b/hadoop-hdfs-project/hadoop-hdfs/src/test/java/org/apache/hadoop/hdfs/server/blockmanagement/TestBlockInfoStriped.java
-index 319615f..7a98259 100644
+index 09260fb..a387731 100644
 --- a/hadoop-hdfs-project/hadoop-hdfs/src/test/java/org/apache/hadoop/hdfs/server/blockmanagement/TestBlockInfoStriped.java
 +++ b/hadoop-hdfs-project/hadoop-hdfs/src/test/java/org/apache/hadoop/hdfs/server/blockmanagement/TestBlockInfoStriped.java
-@@ -202,6 +202,34 @@ public void testRemoveStorage() {
+@@ -205,6 +205,36 @@ public void testRemoveStorage() {
    }
  
    @Test
@@ -526,7 +548,9 @@ index 319615f..7a98259 100644
 +    info.replaceBlock(newBlockInfo);
 +
 +    // make sure the newBlockInfo is correct
-+    byte[] indices = (byte[]) Whitebox.getInternalState(newBlockInfo, "indices");
++    Assert.assertTrue(newBlockInfo.isStriped());
++    byte[] indices = (byte[]) Whitebox.getInternalState(
++        newBlockInfo.getStripedBlockStorageOp(), "indices");
 +    for (int i = 0; i < storages.length; i += 2) {
 +      int index = newBlockInfo.findStorageInfo(storages[i]);
 +      Assert.assertEquals(i, index);
@@ -543,3 +567,47 @@ index 319615f..7a98259 100644
    public void testWrite() {
      long blkID = 1;
      long numBytes = 1;
+diff --git a/hadoop-hdfs-project/hadoop-hdfs/src/test/java/org/apache/hadoop/hdfs/server/blockmanagement/TestReplicationPolicy.java b/hadoop-hdfs-project/hadoop-hdfs/src/test/java/org/apache/hadoop/hdfs/server/blockmanagement/TestReplicationPolicy.java
+index 44f0e65..a0b08a0 100644
+--- a/hadoop-hdfs-project/hadoop-hdfs/src/test/java/org/apache/hadoop/hdfs/server/blockmanagement/TestReplicationPolicy.java
++++ b/hadoop-hdfs-project/hadoop-hdfs/src/test/java/org/apache/hadoop/hdfs/server/blockmanagement/TestReplicationPolicy.java
+@@ -1162,8 +1162,17 @@ public void testAddStoredBlockDoesNotCauseSkippedReplication()
+     BlockManager bm = new BlockManager(mockNS, new HdfsConfiguration());
+     UnderReplicatedBlocks underReplicatedBlocks = bm.neededReplications;
+ 
+-    BlockInfo block1 = genBlockInfo(ThreadLocalRandom.current().nextLong());
+-    BlockInfo block2 = genBlockInfo(ThreadLocalRandom.current().nextLong());
++    long blkID1 = ThreadLocalRandom.current().nextLong();
++    if (blkID1 < 0) {
++      blkID1 *= -1;
++    }
++    long blkID2 = ThreadLocalRandom.current().nextLong();
++    if (blkID2 < 0) {
++      blkID2 *= -1;
++    }
++
++    BlockInfo block1 = genBlockInfo(blkID1);
++    BlockInfo block2 = genBlockInfo(blkID2);
+ 
+     // Adding QUEUE_UNDER_REPLICATED block
+     underReplicatedBlocks.add(block1, 0, 1, 1);
+@@ -1209,8 +1218,17 @@ public void testAddStoredBlockDoesNotCauseSkippedReplication()
+     BlockManager bm = new BlockManager(mockNS, new HdfsConfiguration());
+     UnderReplicatedBlocks underReplicatedBlocks = bm.neededReplications;
+ 
+-    BlockInfo block1 = genBlockInfo(ThreadLocalRandom.current().nextLong());
+-    BlockInfo block2 = genBlockInfo(ThreadLocalRandom.current().nextLong());
++    long blkID1 = ThreadLocalRandom.current().nextLong();
++    if (blkID1 < 0) {
++      blkID1 *= -1;
++    }
++    long blkID2 = ThreadLocalRandom.current().nextLong();
++    if (blkID2 < 0) {
++      blkID2 *= -1;
++    }
++
++    BlockInfo block1 = genBlockInfo(blkID1);
++    BlockInfo block2 = genBlockInfo(blkID2);
+ 
+     // Adding QUEUE_UNDER_REPLICATED block
+     underReplicatedBlocks.add(block1, 0, 1, 1);

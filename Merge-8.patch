@@ -1069,6 +1069,19 @@ index 3a5dc12..521cd55 100644
  
      private final FeatureInfo info;
  
+diff --git a/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/namenode/NameNodeRpcServer.java b/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/namenode/NameNodeRpcServer.java
+index 957c4e7..1037683 100644
+--- a/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/namenode/NameNodeRpcServer.java
++++ b/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/namenode/NameNodeRpcServer.java
+@@ -790,7 +790,7 @@ public void reportBadBlocks(LocatedBlock[] blocks) throws IOException {
+   public LocatedBlock updateBlockForPipeline(ExtendedBlock block, String clientName)
+       throws IOException {
+     checkNNStartup();
+-    return namesystem.updateBlockForPipeline(block, clientName);
++    return namesystem.bumpBlockGenerationStamp(block, clientName);
+   }
+ 
+ 
 diff --git a/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/namenode/snapshot/FSImageFormatPBSnapshot.java b/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/namenode/snapshot/FSImageFormatPBSnapshot.java
 index 64ad1f6..4e68054 100644
 --- a/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/namenode/snapshot/FSImageFormatPBSnapshot.java
@@ -1126,3 +1139,16 @@ index 34a0820..1a10ebf 100644
    public void testGetErasureCodingInfoWithSystemDefaultSchema() throws Exception {
      String src = "/ec";
      final Path ecDir = new Path(src);
+diff --git a/hadoop-hdfs-project/hadoop-hdfs/src/test/java/org/apache/hadoop/hdfs/server/namenode/TestTruncateQuotaUpdate.java b/hadoop-hdfs-project/hadoop-hdfs/src/test/java/org/apache/hadoop/hdfs/server/namenode/TestTruncateQuotaUpdate.java
+index 106edad..9b1936e 100644
+--- a/hadoop-hdfs-project/hadoop-hdfs/src/test/java/org/apache/hadoop/hdfs/server/namenode/TestTruncateQuotaUpdate.java
++++ b/hadoop-hdfs-project/hadoop-hdfs/src/test/java/org/apache/hadoop/hdfs/server/namenode/TestTruncateQuotaUpdate.java
+@@ -78,7 +78,7 @@ public void testTruncateWithoutSnapshot() {
+   @Test
+   public void testTruncateWithSnapshotNoDivergence() {
+     INodeFile file = createMockFile(BLOCKSIZE * 2 + BLOCKSIZE / 2, REPLICATION);
+-    addSnapshotFeature(file, file.getBlocks());
++    addSnapshotFeature(file, file.getContiguousBlocks());
+ 
+     // case 4: truncate to 1.5 blocks
+     // all the blocks are in snapshot. truncate need to allocate a new block

@@ -1,8 +1,8 @@
 diff --git a/hadoop-hdfs-project/hadoop-hdfs-client/src/main/java/org/apache/hadoop/hdfs/client/HdfsClientConfigKeys.java b/hadoop-hdfs-project/hadoop-hdfs-client/src/main/java/org/apache/hadoop/hdfs/client/HdfsClientConfigKeys.java
-index e6d579b..53cf748 100644
+index 600c7ca..214e15d 100644
 --- a/hadoop-hdfs-project/hadoop-hdfs-client/src/main/java/org/apache/hadoop/hdfs/client/HdfsClientConfigKeys.java
 +++ b/hadoop-hdfs-project/hadoop-hdfs-client/src/main/java/org/apache/hadoop/hdfs/client/HdfsClientConfigKeys.java
-@@ -178,6 +178,18 @@
+@@ -179,6 +179,18 @@
      int     THREADPOOL_SIZE_DEFAULT = 0;
    }
  
@@ -2916,19 +2916,6 @@ index a257e32..9aef436 100644
 -}
 \ No newline at end of file
 +}
-diff --git a/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/namenode/NameNodeRpcServer.java b/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/namenode/NameNodeRpcServer.java
-index 957c4e7..1037683 100644
---- a/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/namenode/NameNodeRpcServer.java
-+++ b/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/namenode/NameNodeRpcServer.java
-@@ -790,7 +790,7 @@ public void reportBadBlocks(LocatedBlock[] blocks) throws IOException {
-   public LocatedBlock updateBlockForPipeline(ExtendedBlock block, String clientName)
-       throws IOException {
-     checkNNStartup();
--    return namesystem.updateBlockForPipeline(block, clientName);
-+    return namesystem.bumpBlockGenerationStamp(block, clientName);
-   }
- 
- 
 diff --git a/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/util/StripedBlockUtil.java b/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/util/StripedBlockUtil.java
 index 12f7674..579434b 100644
 --- a/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/util/StripedBlockUtil.java
@@ -3835,7 +3822,7 @@ index 88b7f37..829cf03 100644
        setInetSocketAddress(targetAddr).
        setBlock(block).
 diff --git a/hadoop-hdfs-project/hadoop-hdfs/src/test/java/org/apache/hadoop/hdfs/DFSTestUtil.java b/hadoop-hdfs-project/hadoop-hdfs/src/test/java/org/apache/hadoop/hdfs/DFSTestUtil.java
-index 89ee674..6fca581 100644
+index 89ee674..5a6b61d 100644
 --- a/hadoop-hdfs-project/hadoop-hdfs/src/test/java/org/apache/hadoop/hdfs/DFSTestUtil.java
 +++ b/hadoop-hdfs-project/hadoop-hdfs/src/test/java/org/apache/hadoop/hdfs/DFSTestUtil.java
 @@ -24,6 +24,8 @@
@@ -3874,7 +3861,33 @@ index 89ee674..6fca581 100644
  import org.apache.hadoop.hdfs.tools.DFSAdmin;
  import org.apache.hadoop.io.IOUtils;
  import org.apache.hadoop.io.nativeio.NativeIO;
-@@ -1859,4 +1866,150 @@ public static void fillExpectedBuf(LocatedBlocks lbs, byte[] expected) {
+@@ -808,15 +815,21 @@ public static String readFile(File f) throws IOException {
+     return os.toByteArray();
+   }
+ 
+-  /* Write the given string to the given file */
+-  public static void writeFile(FileSystem fs, Path p, String s) 
++  /* Write the given bytes to the given file */
++  public static void writeFile(FileSystem fs, Path p, byte[] bytes)
+       throws IOException {
+     if (fs.exists(p)) {
+       fs.delete(p, true);
+     }
+-    InputStream is = new ByteArrayInputStream(s.getBytes());
++    InputStream is = new ByteArrayInputStream(bytes);
+     FSDataOutputStream os = fs.create(p);
+-    IOUtils.copyBytes(is, os, s.length(), true);
++    IOUtils.copyBytes(is, os, bytes.length, true);
++  }
++
++  /* Write the given string to the given file */
++  public static void writeFile(FileSystem fs, Path p, String s)
++      throws IOException {
++    writeFile(fs, p, s.getBytes());
+   }
+ 
+   /* Append the given string to the given file */
+@@ -1859,4 +1872,150 @@ public static void fillExpectedBuf(LocatedBlocks lbs, byte[] expected) {
      }
    }
  
@@ -4025,6 +4038,71 @@ index 89ee674..6fca581 100644
 +    }
 +  }
  }
+diff --git a/hadoop-hdfs-project/hadoop-hdfs/src/test/java/org/apache/hadoop/hdfs/StripedFileTestUtil.java b/hadoop-hdfs-project/hadoop-hdfs/src/test/java/org/apache/hadoop/hdfs/StripedFileTestUtil.java
+new file mode 100644
+index 0000000..2369704
+--- /dev/null
++++ b/hadoop-hdfs-project/hadoop-hdfs/src/test/java/org/apache/hadoop/hdfs/StripedFileTestUtil.java
+@@ -0,0 +1,59 @@
++/**
++ * Licensed to the Apache Software Foundation (ASF) under one
++ * or more contributor license agreements.  See the NOTICE file
++ * distributed with this work for additional information
++ * regarding copyright ownership.  The ASF licenses this file
++ * to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance
++ * with the License.  You may obtain a copy of the License at
++ *
++ *     http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package org.apache.hadoop.hdfs;
++
++import org.apache.hadoop.fs.FSDataInputStream;
++import org.apache.hadoop.hdfs.protocol.HdfsConstants;
++
++import java.io.IOException;
++import java.util.Random;
++
++public class StripedFileTestUtil {
++  static int dataBlocks = HdfsConstants.NUM_DATA_BLOCKS;
++  static int parityBlocks = HdfsConstants.NUM_PARITY_BLOCKS;
++
++  static final int cellSize = HdfsConstants.BLOCK_STRIPED_CELL_SIZE;
++  static final int stripesPerBlock = 4;
++  static final int blockSize = cellSize * stripesPerBlock;
++  static final int numDNs = dataBlocks + parityBlocks + 2;
++
++  static final Random random = new Random();
++
++  static byte[] generateBytes(int cnt) {
++    byte[] bytes = new byte[cnt];
++    for (int i = 0; i < cnt; i++) {
++      bytes[i] = getByte(i);
++    }
++    return bytes;
++  }
++
++  static int readAll(FSDataInputStream in, byte[] buf) throws IOException {
++    int readLen = 0;
++    int ret;
++    while ((ret = in.read(buf, readLen, buf.length - readLen)) >= 0 &&
++        readLen <= buf.length) {
++      readLen += ret;
++    }
++    return readLen;
++  }
++
++  static byte getByte(long pos) {
++    final int mod = 29;
++    return (byte) (pos % mod + 1);
++  }
++}
 diff --git a/hadoop-hdfs-project/hadoop-hdfs/src/test/java/org/apache/hadoop/hdfs/TestBlockReaderFactory.java b/hadoop-hdfs-project/hadoop-hdfs/src/test/java/org/apache/hadoop/hdfs/TestBlockReaderFactory.java
 index d8aceff..1a767c3 100644
 --- a/hadoop-hdfs-project/hadoop-hdfs/src/test/java/org/apache/hadoop/hdfs/TestBlockReaderFactory.java
@@ -4073,3 +4151,1950 @@ index d8aceff..1a767c3 100644
        blockReader.readFully(buf, 0, TEST_FILE_LEN);
      } finally {
        if (blockReader != null) blockReader.close();
+diff --git a/hadoop-hdfs-project/hadoop-hdfs/src/test/java/org/apache/hadoop/hdfs/TestDFSStripedInputStream.java b/hadoop-hdfs-project/hadoop-hdfs/src/test/java/org/apache/hadoop/hdfs/TestDFSStripedInputStream.java
+new file mode 100644
+index 0000000..c520d2c
+--- /dev/null
++++ b/hadoop-hdfs-project/hadoop-hdfs/src/test/java/org/apache/hadoop/hdfs/TestDFSStripedInputStream.java
+@@ -0,0 +1,336 @@
++/**
++ * Licensed to the Apache Software Foundation (ASF) under one
++ * or more contributor license agreements.  See the NOTICE file
++ * distributed with this work for additional information
++ * regarding copyright ownership.  The ASF licenses this file
++ * to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance
++ * with the License.  You may obtain a copy of the License at
++ *
++ *     http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package org.apache.hadoop.hdfs;
++
++import org.apache.commons.logging.Log;
++import org.apache.commons.logging.LogFactory;
++import org.apache.hadoop.conf.Configuration;
++import static org.apache.hadoop.fs.CommonConfigurationKeysPublic.IO_FILE_BUFFER_SIZE_DEFAULT;
++import static org.apache.hadoop.fs.CommonConfigurationKeysPublic.IO_FILE_BUFFER_SIZE_KEY;
++import org.apache.hadoop.fs.Path;
++import org.apache.hadoop.hdfs.protocol.Block;
++import org.apache.hadoop.hdfs.protocol.HdfsConstants;
++import org.apache.hadoop.hdfs.protocol.LocatedBlock;
++import org.apache.hadoop.hdfs.protocol.LocatedBlocks;
++import org.apache.hadoop.hdfs.protocol.LocatedStripedBlock;
++import static org.junit.Assert.assertArrayEquals;
++import static org.junit.Assert.assertEquals;
++import static org.junit.Assert.assertTrue;
++
++import org.apache.hadoop.hdfs.server.datanode.DataNode;
++import org.apache.hadoop.hdfs.server.datanode.DataNodeTestUtils;
++import org.apache.hadoop.hdfs.server.datanode.SimulatedFSDataset;
++import org.apache.hadoop.hdfs.server.namenode.ErasureCodingSchemaManager;
++import org.apache.hadoop.hdfs.util.StripedBlockUtil;
++import org.apache.hadoop.io.erasurecode.CodecUtil;
++import org.apache.hadoop.io.erasurecode.ECSchema;
++import org.apache.hadoop.io.erasurecode.rawcoder.RSRawDecoder;
++import org.apache.hadoop.io.erasurecode.rawcoder.RawErasureDecoder;
++import org.junit.After;
++import org.junit.Assert;
++import org.junit.Before;
++import org.junit.Test;
++
++import java.io.IOException;
++import java.nio.ByteBuffer;
++import java.util.Arrays;
++import java.util.List;
++
++public class TestDFSStripedInputStream {
++
++  public static final Log LOG = LogFactory.getLog(TestDFSStripedInputStream.class);
++
++  private MiniDFSCluster cluster;
++  private Configuration conf = new Configuration();
++  private DistributedFileSystem fs;
++  private final Path dirPath = new Path("/striped");
++  private Path filePath = new Path(dirPath, "file");
++  private final ECSchema schema = ErasureCodingSchemaManager.getSystemDefaultSchema();
++  private final short DATA_BLK_NUM = HdfsConstants.NUM_DATA_BLOCKS;
++  private final short PARITY_BLK_NUM = HdfsConstants.NUM_PARITY_BLOCKS;
++  private final int CELLSIZE = HdfsConstants.BLOCK_STRIPED_CELL_SIZE;
++  private final int NUM_STRIPE_PER_BLOCK = 2;
++  private final int INTERNAL_BLOCK_SIZE = NUM_STRIPE_PER_BLOCK * CELLSIZE;
++  private final int BLOCK_GROUP_SIZE =  DATA_BLK_NUM * INTERNAL_BLOCK_SIZE;
++
++  @Before
++  public void setup() throws IOException {
++    conf.setLong(DFSConfigKeys.DFS_BLOCK_SIZE_KEY, INTERNAL_BLOCK_SIZE);
++    SimulatedFSDataset.setFactory(conf);
++    cluster = new MiniDFSCluster.Builder(conf).numDataNodes(
++        DATA_BLK_NUM + PARITY_BLK_NUM).build();
++    cluster.waitActive();
++    for (DataNode dn : cluster.getDataNodes()) {
++      DataNodeTestUtils.setHeartbeatsDisabledForTests(dn, true);
++    }
++    fs = cluster.getFileSystem();
++    fs.mkdirs(dirPath);
++    fs.getClient().createErasureCodingZone(dirPath.toString(), null, CELLSIZE);
++  }
++
++  @After
++  public void tearDown() {
++    if (cluster != null) {
++      cluster.shutdown();
++    }
++  }
++
++  /**
++   * Test {@link DFSStripedInputStream#getBlockAt(long)}
++   */
++  @Test
++  public void testRefreshBlock() throws Exception {
++    final int numBlocks = 4;
++    DFSTestUtil.createStripedFile(cluster, filePath, null, numBlocks,
++        NUM_STRIPE_PER_BLOCK, false);
++    LocatedBlocks lbs = fs.getClient().namenode.getBlockLocations(
++        filePath.toString(), 0, BLOCK_GROUP_SIZE * numBlocks);
++    final DFSStripedInputStream in = new DFSStripedInputStream(fs.getClient(),
++        filePath.toString(), false, schema, CELLSIZE, null);
++
++    List<LocatedBlock> lbList = lbs.getLocatedBlocks();
++    for (LocatedBlock aLbList : lbList) {
++      LocatedStripedBlock lsb = (LocatedStripedBlock) aLbList;
++      LocatedBlock[] blks = StripedBlockUtil.parseStripedBlockGroup(lsb,
++          CELLSIZE, DATA_BLK_NUM, PARITY_BLK_NUM);
++      for (int j = 0; j < DATA_BLK_NUM; j++) {
++        LocatedBlock refreshed = in.refreshLocatedBlock(blks[j]);
++        assertEquals(blks[j].getBlock(), refreshed.getBlock());
++        assertEquals(blks[j].getStartOffset(), refreshed.getStartOffset());
++        assertArrayEquals(blks[j].getLocations(), refreshed.getLocations());
++      }
++    }
++  }
++
++  @Test
++  public void testPread() throws Exception {
++    final int numBlocks = 2;
++    DFSTestUtil.createStripedFile(cluster, filePath, null, numBlocks,
++        NUM_STRIPE_PER_BLOCK, false);
++    LocatedBlocks lbs = fs.getClient().namenode.getBlockLocations(
++        filePath.toString(), 0, BLOCK_GROUP_SIZE * numBlocks);
++    int fileLen = BLOCK_GROUP_SIZE * numBlocks;
++
++    byte[] expected = new byte[fileLen];
++    assertEquals(numBlocks, lbs.getLocatedBlocks().size());
++    for (int bgIdx = 0; bgIdx < numBlocks; bgIdx++) {
++      LocatedStripedBlock bg = (LocatedStripedBlock) (lbs.get(bgIdx));
++      for (int i = 0; i < DATA_BLK_NUM; i++) {
++        Block blk = new Block(bg.getBlock().getBlockId() + i,
++            NUM_STRIPE_PER_BLOCK * CELLSIZE,
++            bg.getBlock().getGenerationStamp());
++        blk.setGenerationStamp(bg.getBlock().getGenerationStamp());
++        cluster.injectBlocks(i, Arrays.asList(blk),
++            bg.getBlock().getBlockPoolId());
++      }
++
++      /** A variation of {@link DFSTestUtil#fillExpectedBuf} for striped blocks */
++      for (int i = 0; i < NUM_STRIPE_PER_BLOCK; i++) {
++        for (int j = 0; j < DATA_BLK_NUM; j++) {
++          for (int k = 0; k < CELLSIZE; k++) {
++            int posInBlk = i * CELLSIZE + k;
++            int posInFile = i * CELLSIZE * DATA_BLK_NUM + j * CELLSIZE + k;
++            expected[bgIdx*BLOCK_GROUP_SIZE + posInFile] =
++                SimulatedFSDataset.simulatedByte(
++                    new Block(bg.getBlock().getBlockId() + j), posInBlk);
++          }
++        }
++      }
++    }
++    DFSStripedInputStream in = new DFSStripedInputStream(fs.getClient(),
++        filePath.toString(), false, schema, CELLSIZE, null);
++
++    int[] startOffsets = {0, 1, CELLSIZE - 102, CELLSIZE, CELLSIZE + 102,
++        CELLSIZE*DATA_BLK_NUM, CELLSIZE*DATA_BLK_NUM + 102,
++        BLOCK_GROUP_SIZE - 102, BLOCK_GROUP_SIZE, BLOCK_GROUP_SIZE + 102,
++        fileLen - 1};
++    for (int startOffset : startOffsets) {
++      startOffset = Math.max(0, Math.min(startOffset, fileLen - 1));
++      int remaining = fileLen - startOffset;
++      byte[] buf = new byte[fileLen];
++      int ret = in.read(startOffset, buf, 0, fileLen);
++      assertEquals(remaining, ret);
++      for (int i = 0; i < remaining; i++) {
++        Assert.assertEquals("Byte at " + (startOffset + i) + " should be the " +
++                "same",
++            expected[startOffset + i], buf[i]);
++      }
++    }
++    in.close();
++  }
++
++  @Test
++  public void testPreadWithDNFailure() throws Exception {
++    final int numBlocks = 4;
++    final int failedDNIdx = 2;
++    DFSTestUtil.createStripedFile(cluster, filePath, null, numBlocks,
++        NUM_STRIPE_PER_BLOCK, false);
++    LocatedBlocks lbs = fs.getClient().namenode.getBlockLocations(
++        filePath.toString(), 0, BLOCK_GROUP_SIZE);
++
++    assert lbs.get(0) instanceof LocatedStripedBlock;
++    LocatedStripedBlock bg = (LocatedStripedBlock)(lbs.get(0));
++    for (int i = 0; i < DATA_BLK_NUM + PARITY_BLK_NUM; i++) {
++      Block blk = new Block(bg.getBlock().getBlockId() + i,
++          NUM_STRIPE_PER_BLOCK * CELLSIZE,
++          bg.getBlock().getGenerationStamp());
++      blk.setGenerationStamp(bg.getBlock().getGenerationStamp());
++      cluster.injectBlocks(i, Arrays.asList(blk),
++          bg.getBlock().getBlockPoolId());
++    }
++    DFSStripedInputStream in =
++        new DFSStripedInputStream(fs.getClient(), filePath.toString(), false,
++            ErasureCodingSchemaManager.getSystemDefaultSchema(), CELLSIZE, null);
++    int readSize = BLOCK_GROUP_SIZE;
++    byte[] readBuffer = new byte[readSize];
++    byte[] expected = new byte[readSize];
++    cluster.stopDataNode(failedDNIdx);
++    /** A variation of {@link DFSTestUtil#fillExpectedBuf} for striped blocks */
++    for (int i = 0; i < NUM_STRIPE_PER_BLOCK; i++) {
++      for (int j = 0; j < DATA_BLK_NUM; j++) {
++        for (int k = 0; k < CELLSIZE; k++) {
++          int posInBlk = i * CELLSIZE + k;
++          int posInFile = i * CELLSIZE * DATA_BLK_NUM + j * CELLSIZE + k;
++          expected[posInFile] = SimulatedFSDataset.simulatedByte(
++              new Block(bg.getBlock().getBlockId() + j), posInBlk);
++        }
++      }
++    }
++
++    // Update the expected content for decoded data
++    for (int i = 0; i < NUM_STRIPE_PER_BLOCK; i++) {
++      byte[][] decodeInputs = new byte[DATA_BLK_NUM + PARITY_BLK_NUM][CELLSIZE];
++      int[] missingBlkIdx = new int[]{failedDNIdx + PARITY_BLK_NUM, 1, 2};
++      byte[][] decodeOutputs = new byte[PARITY_BLK_NUM][CELLSIZE];
++      for (int j = 0; j < DATA_BLK_NUM; j++) {
++        int posInBuf = i * CELLSIZE * DATA_BLK_NUM + j * CELLSIZE;
++        if (j != failedDNIdx) {
++          System.arraycopy(expected, posInBuf, decodeInputs[j + PARITY_BLK_NUM],
++              0, CELLSIZE);
++        }
++      }
++      for (int k = 0; k < CELLSIZE; k++) {
++        int posInBlk = i * CELLSIZE + k;
++        decodeInputs[0][k] = SimulatedFSDataset.simulatedByte(
++            new Block(bg.getBlock().getBlockId() + DATA_BLK_NUM), posInBlk);
++      }
++      for (int m : missingBlkIdx) {
++        decodeInputs[m] = null;
++      }
++      RawErasureDecoder rawDecoder = CodecUtil.createRSRawDecoder(conf,
++          DATA_BLK_NUM, PARITY_BLK_NUM);
++      rawDecoder.decode(decodeInputs, missingBlkIdx, decodeOutputs);
++      int posInBuf = i * CELLSIZE * DATA_BLK_NUM + failedDNIdx * CELLSIZE;
++      System.arraycopy(decodeOutputs[0], 0, expected, posInBuf, CELLSIZE);
++    }
++    int delta = 10;
++    int done = 0;
++    // read a small delta, shouldn't trigger decode
++    // |cell_0 |
++    // |10     |
++    done += in.read(0, readBuffer, 0, delta);
++    assertEquals(delta, done);
++    // both head and trail cells are partial
++    // |c_0      |c_1    |c_2 |c_3 |c_4      |c_5         |
++    // |256K - 10|missing|256K|256K|256K - 10|not in range|
++    done += in.read(delta, readBuffer, delta,
++        CELLSIZE * (DATA_BLK_NUM - 1) - 2 * delta);
++    assertEquals(CELLSIZE * (DATA_BLK_NUM - 1) - delta, done);
++    // read the rest
++    done += in.read(done, readBuffer, done, readSize - done);
++    assertEquals(readSize, done);
++    assertArrayEquals(expected, readBuffer);
++  }
++
++  @Test
++  public void testStatefulRead() throws Exception {
++    testStatefulRead(false, false);
++    testStatefulRead(true, false);
++    testStatefulRead(true, true);
++  }
++
++  private void testStatefulRead(boolean useByteBuffer, boolean cellMisalignPacket)
++      throws Exception {
++    final int numBlocks = 2;
++    final int fileSize = numBlocks * BLOCK_GROUP_SIZE;
++    if (cellMisalignPacket) {
++      conf.setInt(IO_FILE_BUFFER_SIZE_KEY, IO_FILE_BUFFER_SIZE_DEFAULT + 1);
++      tearDown();
++      setup();
++    }
++    DFSTestUtil.createStripedFile(cluster, filePath, null, numBlocks,
++        NUM_STRIPE_PER_BLOCK, false);
++    LocatedBlocks lbs = fs.getClient().namenode.getBlockLocations(filePath.toString(), 0, fileSize);
++
++    assert lbs.getLocatedBlocks().size() == numBlocks;
++    for (LocatedBlock lb : lbs.getLocatedBlocks()) {
++      assert lb instanceof LocatedStripedBlock;
++      LocatedStripedBlock bg = (LocatedStripedBlock)(lb);
++      for (int i = 0; i < DATA_BLK_NUM; i++) {
++        Block blk = new Block(bg.getBlock().getBlockId() + i,
++            NUM_STRIPE_PER_BLOCK * CELLSIZE,
++            bg.getBlock().getGenerationStamp());
++        blk.setGenerationStamp(bg.getBlock().getGenerationStamp());
++        cluster.injectBlocks(i, Arrays.asList(blk),
++            bg.getBlock().getBlockPoolId());
++      }
++    }
++
++    DFSStripedInputStream in =
++        new DFSStripedInputStream(fs.getClient(), filePath.toString(),
++            false, schema, CELLSIZE, null);
++
++    byte[] expected = new byte[fileSize];
++
++    for (LocatedBlock bg : lbs.getLocatedBlocks()) {
++      /** A variation of {@link DFSTestUtil#fillExpectedBuf} for striped blocks */
++      for (int i = 0; i < NUM_STRIPE_PER_BLOCK; i++) {
++        for (int j = 0; j < DATA_BLK_NUM; j++) {
++          for (int k = 0; k < CELLSIZE; k++) {
++            int posInBlk = i * CELLSIZE + k;
++            int posInFile = (int) bg.getStartOffset() +
++                i * CELLSIZE * DATA_BLK_NUM + j * CELLSIZE + k;
++            expected[posInFile] = SimulatedFSDataset.simulatedByte(
++                new Block(bg.getBlock().getBlockId() + j), posInBlk);
++          }
++        }
++      }
++    }
++
++    if (useByteBuffer) {
++      ByteBuffer readBuffer = ByteBuffer.allocate(fileSize);
++      int done = 0;
++      while (done < fileSize) {
++        int ret = in.read(readBuffer);
++        assertTrue(ret > 0);
++        done += ret;
++      }
++      assertArrayEquals(expected, readBuffer.array());
++    } else {
++      byte[] readBuffer = new byte[fileSize];
++      int done = 0;
++      while (done < fileSize) {
++        int ret = in.read(readBuffer, done, fileSize - done);
++        assertTrue(ret > 0);
++        done += ret;
++      }
++      assertArrayEquals(expected, readBuffer);
++    }
++    fs.delete(filePath, true);
++  }
++}
+diff --git a/hadoop-hdfs-project/hadoop-hdfs/src/test/java/org/apache/hadoop/hdfs/TestDFSStripedOutputStream.java b/hadoop-hdfs-project/hadoop-hdfs/src/test/java/org/apache/hadoop/hdfs/TestDFSStripedOutputStream.java
+new file mode 100644
+index 0000000..3f40dee
+--- /dev/null
++++ b/hadoop-hdfs-project/hadoop-hdfs/src/test/java/org/apache/hadoop/hdfs/TestDFSStripedOutputStream.java
+@@ -0,0 +1,293 @@
++/**
++ * Licensed to the Apache Software Foundation (ASF) under one
++ * or more contributor license agreements.  See the NOTICE file
++ * distributed with this work for additional information
++ * regarding copyright ownership.  The ASF licenses this file
++ * to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance
++ * with the License.  You may obtain a copy of the License at
++ *
++ *     http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package org.apache.hadoop.hdfs;
++
++import java.io.IOException;
++import java.util.ArrayList;
++import java.util.Arrays;
++import java.util.List;
++
++import org.apache.commons.logging.Log;
++import org.apache.commons.logging.LogFactory;
++import org.apache.hadoop.conf.Configuration;
++import org.apache.hadoop.fs.FileStatus;
++import org.apache.hadoop.fs.Path;
++import org.apache.hadoop.hdfs.protocol.ExtendedBlock;
++import org.apache.hadoop.hdfs.protocol.HdfsConstants;
++import org.apache.hadoop.hdfs.protocol.LocatedBlock;
++import org.apache.hadoop.hdfs.protocol.LocatedBlocks;
++import org.apache.hadoop.hdfs.protocol.LocatedStripedBlock;
++import org.apache.hadoop.hdfs.util.StripedBlockUtil;
++import org.apache.hadoop.io.erasurecode.CodecUtil;
++import org.apache.hadoop.io.erasurecode.rawcoder.RSRawEncoder;
++import org.apache.hadoop.io.erasurecode.rawcoder.RawErasureEncoder;
++import org.apache.hadoop.test.GenericTestUtils;
++import org.apache.log4j.Level;
++import org.junit.After;
++import org.junit.Assert;
++import org.junit.Before;
++import org.junit.Test;
++
++public class TestDFSStripedOutputStream {
++  public static final Log LOG = LogFactory.getLog(
++      TestDFSStripedOutputStream.class);
++
++  static {
++    GenericTestUtils.setLogLevel(DFSOutputStream.LOG, Level.ALL);
++    GenericTestUtils.setLogLevel(DataStreamer.LOG, Level.ALL);
++  }
++
++  private int dataBlocks = HdfsConstants.NUM_DATA_BLOCKS;
++  private int parityBlocks = HdfsConstants.NUM_PARITY_BLOCKS;
++
++  private MiniDFSCluster cluster;
++  private DistributedFileSystem fs;
++  private Configuration conf;
++  private final int cellSize = HdfsConstants.BLOCK_STRIPED_CELL_SIZE;
++  private final int stripesPerBlock = 4;
++  private final int blockSize = cellSize * stripesPerBlock;
++
++  @Before
++  public void setup() throws IOException {
++    int numDNs = dataBlocks + parityBlocks + 2;
++    conf = new Configuration();
++    conf.setLong(DFSConfigKeys.DFS_BLOCK_SIZE_KEY, blockSize);
++    cluster = new MiniDFSCluster.Builder(conf).numDataNodes(numDNs).build();
++    cluster.getFileSystem().getClient().createErasureCodingZone("/", null, 0);
++    fs = cluster.getFileSystem();
++  }
++
++  @After
++  public void tearDown() {
++    if (cluster != null) {
++      cluster.shutdown();
++    }
++  }
++
++  @Test
++  public void testFileEmpty() throws IOException {
++    testOneFile("/EmptyFile", 0);
++  }
++
++  @Test
++  public void testFileSmallerThanOneCell1() throws IOException {
++    testOneFile("/SmallerThanOneCell", 1);
++  }
++
++  @Test
++  public void testFileSmallerThanOneCell2() throws IOException {
++    testOneFile("/SmallerThanOneCell", cellSize - 1);
++  }
++
++  @Test
++  public void testFileEqualsWithOneCell() throws IOException {
++    testOneFile("/EqualsWithOneCell", cellSize);
++  }
++
++  @Test
++  public void testFileSmallerThanOneStripe1() throws IOException {
++    testOneFile("/SmallerThanOneStripe", cellSize * dataBlocks - 1);
++  }
++
++  @Test
++  public void testFileSmallerThanOneStripe2() throws IOException {
++    testOneFile("/SmallerThanOneStripe", cellSize + 123);
++  }
++
++  @Test
++  public void testFileEqualsWithOneStripe() throws IOException {
++    testOneFile("/EqualsWithOneStripe", cellSize * dataBlocks);
++  }
++
++  @Test
++  public void testFileMoreThanOneStripe1() throws IOException {
++    testOneFile("/MoreThanOneStripe1", cellSize * dataBlocks + 123);
++  }
++
++  @Test
++  public void testFileMoreThanOneStripe2() throws IOException {
++    testOneFile("/MoreThanOneStripe2", cellSize * dataBlocks
++            + cellSize * dataBlocks + 123);
++  }
++
++  @Test
++  public void testFileLessThanFullBlockGroup() throws IOException {
++    testOneFile("/LessThanFullBlockGroup",
++        cellSize * dataBlocks * (stripesPerBlock - 1) + cellSize);
++  }
++
++  @Test
++  public void testFileFullBlockGroup() throws IOException {
++    testOneFile("/FullBlockGroup", blockSize * dataBlocks);
++  }
++
++  @Test
++  public void testFileMoreThanABlockGroup1() throws IOException {
++    testOneFile("/MoreThanABlockGroup1", blockSize * dataBlocks + 123);
++  }
++
++  @Test
++  public void testFileMoreThanABlockGroup2() throws IOException {
++    testOneFile("/MoreThanABlockGroup2",
++        blockSize * dataBlocks + cellSize+ 123);
++  }
++
++
++  @Test
++  public void testFileMoreThanABlockGroup3() throws IOException {
++    testOneFile("/MoreThanABlockGroup3",
++        blockSize * dataBlocks * 3 + cellSize * dataBlocks
++        + cellSize + 123);
++  }
++
++  private byte[] generateBytes(int cnt) {
++    byte[] bytes = new byte[cnt];
++    for (int i = 0; i < cnt; i++) {
++      bytes[i] = getByte(i);
++    }
++    return bytes;
++  }
++
++  private byte getByte(long pos) {
++    int mod = 29;
++    return (byte) (pos % mod + 1);
++  }
++
++  private void testOneFile(String src, int writeBytes) throws IOException {
++    Path testPath = new Path(src);
++
++    byte[] bytes = generateBytes(writeBytes);
++    DFSTestUtil.writeFile(fs, testPath, new String(bytes));
++
++    // check file length
++    FileStatus status = fs.getFileStatus(testPath);
++    Assert.assertEquals(writeBytes, status.getLen());
++
++    checkData(src, writeBytes);
++  }
++
++  void checkData(String src, int writeBytes) throws IOException {
++    List<List<LocatedBlock>> blockGroupList = new ArrayList<>();
++    LocatedBlocks lbs = fs.getClient().getLocatedBlocks(src, 0L);
++
++    for (LocatedBlock firstBlock : lbs.getLocatedBlocks()) {
++      Assert.assertTrue(firstBlock instanceof LocatedStripedBlock);
++      LocatedBlock[] blocks = StripedBlockUtil.
++          parseStripedBlockGroup((LocatedStripedBlock) firstBlock,
++              cellSize, dataBlocks, parityBlocks);
++      List<LocatedBlock> oneGroup = Arrays.asList(blocks);
++      blockGroupList.add(oneGroup);
++    }
++
++    // test each block group
++    for (int group = 0; group < blockGroupList.size(); group++) {
++      //get the data of this block
++      List<LocatedBlock> blockList = blockGroupList.get(group);
++      byte[][] dataBlockBytes = new byte[dataBlocks][];
++      byte[][] parityBlockBytes = new byte[parityBlocks][];
++
++      // for each block, use BlockReader to read data
++      for (int i = 0; i < blockList.size(); i++) {
++        LocatedBlock lblock = blockList.get(i);
++        if (lblock == null) {
++          continue;
++        }
++        ExtendedBlock block = lblock.getBlock();
++        byte[] blockBytes = new byte[(int)block.getNumBytes()];
++        if (i < dataBlocks) {
++          dataBlockBytes[i] = blockBytes;
++        } else {
++          parityBlockBytes[i - dataBlocks] = blockBytes;
++        }
++
++        if (block.getNumBytes() == 0) {
++          continue;
++        }
++
++        final BlockReader blockReader = BlockReaderTestUtil.getBlockReader(
++            fs, lblock, 0, block.getNumBytes());
++        blockReader.readAll(blockBytes, 0, (int) block.getNumBytes());
++        blockReader.close();
++      }
++
++      // check if we write the data correctly
++      for (int blkIdxInGroup = 0; blkIdxInGroup < dataBlockBytes.length;
++           blkIdxInGroup++) {
++        final byte[] actualBlkBytes = dataBlockBytes[blkIdxInGroup];
++        if (actualBlkBytes == null) {
++          continue;
++        }
++        for (int posInBlk = 0; posInBlk < actualBlkBytes.length; posInBlk++) {
++          // calculate the position of this byte in the file
++          long posInFile = StripedBlockUtil.offsetInBlkToOffsetInBG(cellSize,
++              dataBlocks, posInBlk, blkIdxInGroup) +
++              group * blockSize * dataBlocks;
++          Assert.assertTrue(posInFile < writeBytes);
++          final byte expected = getByte(posInFile);
++
++          String s = "Unexpected byte " + actualBlkBytes[posInBlk]
++              + ", expect " + expected
++              + ". Block group index is " + group
++              + ", stripe index is " + posInBlk / cellSize
++              + ", cell index is " + blkIdxInGroup
++              + ", byte index is " + posInBlk % cellSize;
++          Assert.assertEquals(s, expected, actualBlkBytes[posInBlk]);
++        }
++      }
++
++      verifyParity(lbs.getLocatedBlocks().get(group).getBlockSize(),
++          cellSize, dataBlockBytes, parityBlockBytes);
++    }
++  }
++
++  void verifyParity(final long size, final int cellSize,
++      byte[][] dataBytes, byte[][] parityBytes) {
++    verifyParity(conf, size, cellSize, dataBytes, parityBytes, -1);
++  }
++
++  static void verifyParity(Configuration conf, final long size,
++                           final int cellSize, byte[][] dataBytes,
++                           byte[][] parityBytes, int killedDnIndex) {
++    // verify the parity blocks
++    int parityBlkSize = (int) StripedBlockUtil.getInternalBlockLength(
++        size, cellSize, dataBytes.length, dataBytes.length);
++    final byte[][] expectedParityBytes = new byte[parityBytes.length][];
++    for (int i = 0; i < parityBytes.length; i++) {
++      expectedParityBytes[i] = new byte[parityBlkSize];
++    }
++    for (int i = 0; i < dataBytes.length; i++) {
++      if (dataBytes[i] == null) {
++        dataBytes[i] = new byte[dataBytes[0].length];
++      } else if (dataBytes[i].length < dataBytes[0].length) {
++        final byte[] tmp = dataBytes[i];
++        dataBytes[i] = new byte[dataBytes[0].length];
++        System.arraycopy(tmp, 0, dataBytes[i], 0, tmp.length);
++      }
++    }
++    final RawErasureEncoder encoder =
++            CodecUtil.createRSRawEncoder(conf,
++                dataBytes.length, parityBytes.length);
++    encoder.encode(dataBytes, expectedParityBytes);
++    for (int i = 0; i < parityBytes.length; i++) {
++      if (i != killedDnIndex) {
++        Assert.assertArrayEquals("i=" + i + ", killedDnIndex=" + killedDnIndex,
++            expectedParityBytes[i], parityBytes[i]);
++      }
++    }
++  }
++}
+diff --git a/hadoop-hdfs-project/hadoop-hdfs/src/test/java/org/apache/hadoop/hdfs/TestDFSStripedOutputStreamWithFailure.java b/hadoop-hdfs-project/hadoop-hdfs/src/test/java/org/apache/hadoop/hdfs/TestDFSStripedOutputStreamWithFailure.java
+new file mode 100644
+index 0000000..8944cde
+--- /dev/null
++++ b/hadoop-hdfs-project/hadoop-hdfs/src/test/java/org/apache/hadoop/hdfs/TestDFSStripedOutputStreamWithFailure.java
+@@ -0,0 +1,351 @@
++/**
++ * Licensed to the Apache Software Foundation (ASF) under one
++ * or more contributor license agreements.  See the NOTICE file
++ * distributed with this work for additional information
++ * regarding copyright ownership.  The ASF licenses this file
++ * to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance
++ * with the License.  You may obtain a copy of the License at
++ *
++ *     http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package org.apache.hadoop.hdfs;
++
++import java.io.IOException;
++import java.util.ArrayList;
++import java.util.Arrays;
++import java.util.List;
++import java.util.concurrent.atomic.AtomicInteger;
++
++import org.apache.commons.logging.Log;
++import org.apache.commons.logging.LogFactory;
++import org.apache.hadoop.fs.FSDataOutputStream;
++import org.apache.hadoop.fs.FileStatus;
++import org.apache.hadoop.fs.Path;
++import org.apache.hadoop.hdfs.protocol.DatanodeInfo;
++import org.apache.hadoop.hdfs.protocol.ExtendedBlock;
++import org.apache.hadoop.hdfs.protocol.HdfsConstants;
++import org.apache.hadoop.hdfs.protocol.LocatedBlock;
++import org.apache.hadoop.hdfs.protocol.LocatedBlocks;
++import org.apache.hadoop.hdfs.protocol.LocatedStripedBlock;
++import org.apache.hadoop.hdfs.util.StripedBlockUtil;
++import org.apache.hadoop.test.GenericTestUtils;
++import org.apache.hadoop.util.StringUtils;
++import org.apache.log4j.Level;
++import org.junit.After;
++import org.junit.Assert;
++import org.junit.Before;
++import org.junit.Test;
++
++import com.google.common.base.Preconditions;
++
++public class TestDFSStripedOutputStreamWithFailure {
++  public static final Log LOG = LogFactory.getLog(
++      TestDFSStripedOutputStreamWithFailure.class);
++  static {
++    GenericTestUtils.setLogLevel(DFSOutputStream.LOG, Level.ALL);
++    GenericTestUtils.setLogLevel(DataStreamer.LOG, Level.ALL);
++  }
++
++  private static final int NUM_DATA_BLOCKS = HdfsConstants.NUM_DATA_BLOCKS;
++  private static final int NUM_PARITY_BLOCKS = HdfsConstants.NUM_PARITY_BLOCKS;
++  private static final int CELL_SIZE = HdfsConstants.BLOCK_STRIPED_CELL_SIZE;
++  private static final int STRIPES_PER_BLOCK = 4;
++  private static final int BLOCK_SIZE = CELL_SIZE * STRIPES_PER_BLOCK;
++  private static final int BLOCK_GROUP_SIZE = BLOCK_SIZE * NUM_DATA_BLOCKS;
++
++  private static final int FLUSH_POS
++      = 9*DFSConfigKeys.DFS_BYTES_PER_CHECKSUM_DEFAULT + 1;
++
++  private final HdfsConfiguration conf = new HdfsConfiguration();
++  private MiniDFSCluster cluster;
++  private DistributedFileSystem dfs;
++  private final Path dir = new Path("/"
++      + TestDFSStripedOutputStreamWithFailure.class.getSimpleName());
++
++
++  @Before
++  public void setup() throws IOException {
++    final int numDNs = NUM_DATA_BLOCKS + NUM_PARITY_BLOCKS;
++    conf.setLong(DFSConfigKeys.DFS_BLOCK_SIZE_KEY, BLOCK_SIZE);
++    cluster = new MiniDFSCluster.Builder(conf).numDataNodes(numDNs).build();
++    cluster.waitActive();
++    dfs = cluster.getFileSystem();
++    dfs.mkdirs(dir);
++    dfs.createErasureCodingZone(dir, null, 0);
++  }
++
++  @After
++  public void tearDown() {
++    if (cluster != null) {
++      cluster.shutdown();
++    }
++  }
++
++  private static byte getByte(long pos) {
++    return (byte)pos;
++  }
++
++  @Test(timeout=120000)
++  public void testDatanodeFailure0() {
++    final int length = NUM_DATA_BLOCKS*(BLOCK_SIZE - CELL_SIZE);
++    final int dn = 0;
++    runTest("file" + dn, length, dn);
++  }
++
++  @Test(timeout=120000)
++  public void testDatanodeFailure1() {
++    final int length = NUM_DATA_BLOCKS*(BLOCK_SIZE - CELL_SIZE);
++    final int dn = 1;
++    runTest("file" + dn, length, dn);
++  }
++
++  @Test(timeout=120000)
++  public void testDatanodeFailure2() {
++    final int length = NUM_DATA_BLOCKS*(BLOCK_SIZE - CELL_SIZE);
++    final int dn = 2;
++    runTest("file" + dn, length, dn);
++  }
++
++  @Test(timeout=120000)
++  public void testDatanodeFailure3() {
++    final int length = NUM_DATA_BLOCKS*(BLOCK_SIZE - CELL_SIZE);
++    final int dn = 3;
++    runTest("file" + dn, length, dn);
++  }
++
++  @Test(timeout=120000)
++  public void testDatanodeFailure4() {
++    final int length = NUM_DATA_BLOCKS*(BLOCK_SIZE - CELL_SIZE);
++    final int dn = 4;
++    runTest("file" + dn, length, dn);
++  }
++
++  @Test(timeout=120000)
++  public void testDatanodeFailure5() {
++    final int length = NUM_DATA_BLOCKS*(BLOCK_SIZE - CELL_SIZE);
++    final int dn = 5;
++    runTest("file" + dn, length, dn);
++  }
++
++  @Test(timeout=120000)
++  public void testDatanodeFailure6() {
++    final int length = NUM_DATA_BLOCKS*(BLOCK_SIZE - CELL_SIZE);
++    final int dn = 6;
++    runTest("file" + dn, length, dn);
++  }
++
++  @Test(timeout=120000)
++  public void testDatanodeFailure7() {
++    final int length = NUM_DATA_BLOCKS*(BLOCK_SIZE - CELL_SIZE);
++    final int dn = 7;
++    runTest("file" + dn, length, dn);
++  }
++
++  @Test(timeout=120000)
++  public void testDatanodeFailure8() {
++    final int length = NUM_DATA_BLOCKS*(BLOCK_SIZE - CELL_SIZE);
++    final int dn = 8;
++    runTest("file" + dn, length, dn);
++  }
++
++  private void runTest(final String src, final int length, final int dnIndex) {
++    try {
++      cluster.startDataNodes(conf, 1, true, null, null);
++      cluster.waitActive();
++
++      runTest(new Path(dir, src), length, length/2, dnIndex);
++    } catch(Exception e) {
++      LOG.info("FAILED", e);
++      Assert.fail(StringUtils.stringifyException(e));
++    }
++  }
++
++  private void runTest(final Path p, final int length, final int killPos,
++      final int dnIndex) throws Exception {
++    LOG.info("p=" + p + ", length=" + length + ", killPos=" + killPos
++        + ", dnIndex=" + dnIndex);
++    Preconditions.checkArgument(killPos < length);
++    Preconditions.checkArgument(killPos > FLUSH_POS);
++    final String fullPath = p.toString();
++
++    final AtomicInteger pos = new AtomicInteger();
++    final FSDataOutputStream out = dfs.create(p);
++    final DFSStripedOutputStream stripedOut
++        = (DFSStripedOutputStream)out.getWrappedStream();
++
++    long oldGS = -1;
++    boolean killed = false;
++    for(; pos.get() < length; ) {
++      final int i = pos.getAndIncrement();
++      if (i == killPos) {
++        final long gs = getGenerationStamp(stripedOut);
++        Assert.assertTrue(oldGS != -1);
++        Assert.assertEquals(oldGS, gs);
++
++        killDatanode(cluster, stripedOut, dnIndex, pos);
++        killed = true;
++      }
++
++      write(out, i);
++
++      if (i == FLUSH_POS) {
++        oldGS = getGenerationStamp(stripedOut);
++      }
++    }
++    out.close();
++    Assert.assertTrue(killed);
++
++    // check file length
++    final FileStatus status = dfs.getFileStatus(p);
++    Assert.assertEquals(length, status.getLen());
++
++    checkData(dfs, fullPath, length, dnIndex, oldGS);
++  }
++
++  static void write(FSDataOutputStream out, int i) throws IOException {
++    try {
++      out.write(getByte(i));
++    } catch(IOException ioe) {
++      throw new IOException("Failed at i=" + i, ioe);
++    }
++  }
++
++  static long getGenerationStamp(DFSStripedOutputStream out)
++      throws IOException {
++    final long gs = DFSTestUtil.flushInternal(out).getGenerationStamp();
++    LOG.info("getGenerationStamp returns " + gs);
++    return gs;
++
++  }
++
++  static DatanodeInfo getDatanodes(StripedDataStreamer streamer) {
++    for(;;) {
++      final DatanodeInfo[] datanodes = streamer.getNodes();
++      if (datanodes != null) {
++        Assert.assertEquals(1, datanodes.length);
++        Assert.assertNotNull(datanodes[0]);
++        return datanodes[0];
++      }
++      try {
++        Thread.sleep(100);
++      } catch (InterruptedException ignored) {
++        return null;
++      }
++    }
++  }
++
++  static void killDatanode(MiniDFSCluster cluster, DFSStripedOutputStream out,
++      final int dnIndex, final AtomicInteger pos) {
++    final StripedDataStreamer s = out.getStripedDataStreamer(dnIndex);
++    final DatanodeInfo datanode = getDatanodes(s);
++    LOG.info("killDatanode " + dnIndex + ": " + datanode + ", pos=" + pos);
++    cluster.stopDataNode(datanode.getXferAddr());
++  }
++
++  static void checkData(DistributedFileSystem dfs, String src, int length,
++      int killedDnIndex, long oldGS) throws IOException {
++    List<List<LocatedBlock>> blockGroupList = new ArrayList<>();
++    LocatedBlocks lbs = dfs.getClient().getLocatedBlocks(src, 0L);
++    final int expectedNumGroup = (length - 1)/BLOCK_GROUP_SIZE + 1;
++    Assert.assertEquals(expectedNumGroup, lbs.getLocatedBlocks().size());
++
++    for (LocatedBlock firstBlock : lbs.getLocatedBlocks()) {
++      Assert.assertTrue(firstBlock instanceof LocatedStripedBlock);
++
++      final long gs = firstBlock.getBlock().getGenerationStamp();
++      final String s = "gs=" + gs + ", oldGS=" + oldGS;
++      LOG.info(s);
++      Assert.assertTrue(s, gs > oldGS);
++
++      LocatedBlock[] blocks = StripedBlockUtil.parseStripedBlockGroup(
++          (LocatedStripedBlock) firstBlock,
++          CELL_SIZE, NUM_DATA_BLOCKS, NUM_PARITY_BLOCKS);
++      blockGroupList.add(Arrays.asList(blocks));
++    }
++
++    // test each block group
++    for (int group = 0; group < blockGroupList.size(); group++) {
++      final boolean isLastGroup = group == blockGroupList.size() - 1;
++      final int groupSize = !isLastGroup? BLOCK_GROUP_SIZE
++          : length - (blockGroupList.size() - 1)*BLOCK_GROUP_SIZE;
++      final int numCellInGroup = (groupSize - 1)/CELL_SIZE + 1;
++      final int lastCellIndex = (numCellInGroup - 1) % NUM_DATA_BLOCKS;
++      final int lastCellSize = groupSize - (numCellInGroup - 1)*CELL_SIZE;
++
++      //get the data of this block
++      List<LocatedBlock> blockList = blockGroupList.get(group);
++      byte[][] dataBlockBytes = new byte[NUM_DATA_BLOCKS][];
++      byte[][] parityBlockBytes = new byte[NUM_PARITY_BLOCKS][];
++
++      // for each block, use BlockReader to read data
++      for (int i = 0; i < blockList.size(); i++) {
++        final int j = i >= NUM_DATA_BLOCKS? 0: i;
++        final int numCellInBlock = (numCellInGroup - 1)/NUM_DATA_BLOCKS
++            + (j <= lastCellIndex? 1: 0);
++        final int blockSize = numCellInBlock*CELL_SIZE
++            + (isLastGroup && i == lastCellIndex? lastCellSize - CELL_SIZE: 0);
++
++        final byte[] blockBytes = new byte[blockSize];
++        if (i < NUM_DATA_BLOCKS) {
++          dataBlockBytes[i] = blockBytes;
++        } else {
++          parityBlockBytes[i - NUM_DATA_BLOCKS] = blockBytes;
++        }
++
++        final LocatedBlock lb = blockList.get(i);
++        LOG.info("XXX i=" + i + ", lb=" + lb);
++        if (lb == null) {
++          continue;
++        }
++        final ExtendedBlock block = lb.getBlock();
++        Assert.assertEquals(blockSize, block.getNumBytes());
++
++
++        if (block.getNumBytes() == 0) {
++          continue;
++        }
++
++        if (i != killedDnIndex) {
++          final BlockReader blockReader = BlockReaderTestUtil.getBlockReader(
++              dfs, lb, 0, block.getNumBytes());
++          blockReader.readAll(blockBytes, 0, (int) block.getNumBytes());
++          blockReader.close();
++        }
++      }
++
++      // check data
++      final int groupPosInFile = group*BLOCK_GROUP_SIZE;
++      for (int i = 0; i < dataBlockBytes.length; i++) {
++        final byte[] actual = dataBlockBytes[i];
++        for (int posInBlk = 0; posInBlk < actual.length; posInBlk++) {
++          final long posInFile = StripedBlockUtil.offsetInBlkToOffsetInBG(
++              CELL_SIZE, NUM_DATA_BLOCKS, posInBlk, i) + groupPosInFile;
++          Assert.assertTrue(posInFile < length);
++          final byte expected = getByte(posInFile);
++
++          if (i == killedDnIndex) {
++            actual[posInBlk] = expected;
++          } else {
++            String s = "expected=" + expected + " but actual=" + actual[posInBlk]
++                + ", posInFile=" + posInFile + ", posInBlk=" + posInBlk
++                + ". group=" + group + ", i=" + i;
++            Assert.assertEquals(s, expected, actual[posInBlk]);
++          }
++        }
++      }
++
++      // check parity
++      TestDFSStripedOutputStream.verifyParity(dfs.getConf(),
++          lbs.getLocatedBlocks().get(group).getBlockSize(),
++          CELL_SIZE, dataBlockBytes, parityBlockBytes,
++          killedDnIndex - dataBlockBytes.length);
++    }
++  }
++}
+diff --git a/hadoop-hdfs-project/hadoop-hdfs/src/test/java/org/apache/hadoop/hdfs/TestReadStripedFileWithDecoding.java b/hadoop-hdfs-project/hadoop-hdfs/src/test/java/org/apache/hadoop/hdfs/TestReadStripedFileWithDecoding.java
+new file mode 100644
+index 0000000..3125e2e
+--- /dev/null
++++ b/hadoop-hdfs-project/hadoop-hdfs/src/test/java/org/apache/hadoop/hdfs/TestReadStripedFileWithDecoding.java
+@@ -0,0 +1,237 @@
++/**
++ * Licensed to the Apache Software Foundation (ASF) under one
++ * or more contributor license agreements.  See the NOTICE file
++ * distributed with this work for additional information
++ * regarding copyright ownership.  The ASF licenses this file
++ * to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance
++ * with the License.  You may obtain a copy of the License at
++ *
++ *     http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package org.apache.hadoop.hdfs;
++
++import org.apache.commons.logging.Log;
++import org.apache.commons.logging.LogFactory;
++import org.apache.hadoop.fs.BlockLocation;
++import org.apache.hadoop.fs.FSDataInputStream;
++import org.apache.hadoop.fs.Path;
++import org.apache.hadoop.hdfs.protocol.LocatedBlock;
++import org.apache.hadoop.hdfs.protocol.LocatedStripedBlock;
++import org.apache.hadoop.hdfs.server.datanode.DataNode;
++import org.apache.hadoop.hdfs.util.StripedBlockUtil;
++import org.junit.After;
++import org.junit.Assert;
++import org.junit.Before;
++import org.junit.Test;
++
++import java.io.File;
++import java.io.FileOutputStream;
++import java.io.IOException;
++import java.nio.ByteBuffer;
++
++import static org.apache.hadoop.hdfs.StripedFileTestUtil.*;
++
++public class TestReadStripedFileWithDecoding {
++  static final Log LOG = LogFactory.getLog(TestReadStripedFileWithDecoding.class);
++
++  private MiniDFSCluster cluster;
++  private DistributedFileSystem fs;
++
++  @Before
++  public void setup() throws IOException {
++    cluster = new MiniDFSCluster.Builder(new HdfsConfiguration())
++        .numDataNodes(numDNs).build();
++    cluster.getFileSystem().getClient().createErasureCodingZone("/",
++        null, cellSize);
++    fs = cluster.getFileSystem();
++  }
++
++  @After
++  public void tearDown() throws IOException {
++    if (cluster != null) {
++      cluster.shutdown();
++    }
++  }
++
++  @Test
++  public void testReadWithDNFailure1() throws IOException {
++    testReadWithDNFailure("/foo", cellSize * (dataBlocks + 2), 0);
++  }
++
++  @Test
++  public void testReadWithDNFailure2() throws IOException {
++    testReadWithDNFailure("/foo", cellSize * (dataBlocks + 2), cellSize * 5);
++  }
++
++  @Test
++  public void testReadWithDNFailure3() throws IOException {
++    testReadWithDNFailure("/foo", cellSize * dataBlocks, 0);
++  }
++
++  /**
++   * Delete a data block before reading. Verify the decoding works correctly.
++   */
++  @Test
++  public void testReadCorruptedData() throws IOException {
++    // create file
++    final Path file = new Path("/partially_deleted");
++    final int length = cellSize * dataBlocks * 2;
++    final byte[] bytes = StripedFileTestUtil.generateBytes(length);
++    DFSTestUtil.writeFile(fs, file, bytes);
++
++    // corrupt the first data block
++    // find the corresponding data node
++    int dnIndex = findFirstDataNode(file, cellSize * dataBlocks);
++    Assert.assertNotEquals(-1, dnIndex);
++    // find the target block
++    LocatedStripedBlock slb = (LocatedStripedBlock)fs.getClient()
++        .getLocatedBlocks(file.toString(), 0, cellSize * dataBlocks).get(0);
++    final LocatedBlock[] blks = StripedBlockUtil.parseStripedBlockGroup(slb,
++        cellSize, dataBlocks, parityBlocks);
++    // find the target block file
++    File storageDir = cluster.getInstanceStorageDir(dnIndex, 0);
++    File blkFile = MiniDFSCluster.getBlockFile(storageDir, blks[0].getBlock());
++    Assert.assertTrue("Block file does not exist", blkFile.exists());
++    // delete the block file
++    LOG.info("Deliberately removing file " + blkFile.getName());
++    Assert.assertTrue("Cannot remove file", blkFile.delete());
++    verifyRead(file, length, bytes);
++  }
++
++  /**
++   * Corrupt the content of the data block before reading.
++   */
++  @Test
++  public void testReadCorruptedData2() throws IOException {
++    // create file
++    final Path file = new Path("/partially_corrupted");
++    final int length = cellSize * dataBlocks * 2;
++    final byte[] bytes = StripedFileTestUtil.generateBytes(length);
++    DFSTestUtil.writeFile(fs, file, bytes);
++
++    // corrupt the first data block
++    // find the first data node
++    int dnIndex = findFirstDataNode(file, cellSize * dataBlocks);
++    Assert.assertNotEquals(-1, dnIndex);
++    // find the first data block
++    LocatedStripedBlock slb = (LocatedStripedBlock)fs.getClient()
++        .getLocatedBlocks(file.toString(), 0, cellSize * dataBlocks).get(0);
++    final LocatedBlock[] blks = StripedBlockUtil.parseStripedBlockGroup(slb,
++        cellSize, dataBlocks, parityBlocks);
++    // find the first block file
++    File storageDir = cluster.getInstanceStorageDir(dnIndex, 0);
++    File blkFile = MiniDFSCluster.getBlockFile(storageDir, blks[0].getBlock());
++    Assert.assertTrue("Block file does not exist", blkFile.exists());
++    // corrupt the block file
++    LOG.info("Deliberately corrupting file " + blkFile.getName());
++    try (FileOutputStream out = new FileOutputStream(blkFile)) {
++      out.write("corruption".getBytes());
++    }
++
++    verifyRead(file, length, bytes);
++  }
++
++  private int findFirstDataNode(Path file, long length) throws IOException {
++    BlockLocation[] locs = fs.getFileBlockLocations(file, 0, length);
++    String name = (locs[0].getNames())[0];
++    int dnIndex = 0;
++    for (DataNode dn : cluster.getDataNodes()) {
++      int port = dn.getXferPort();
++      if (name.contains(Integer.toString(port))) {
++        return dnIndex;
++      }
++      dnIndex++;
++    }
++    return -1;
++  }
++
++  private void verifyRead(Path file, int length, byte[] expected)
++      throws IOException {
++    // pread
++    try (FSDataInputStream fsdis = fs.open(file)) {
++      byte[] buf = new byte[length];
++      int readLen = fsdis.read(0, buf, 0, buf.length);
++      Assert.assertEquals("The fileSize of file should be the same to write size",
++          length, readLen);
++      Assert.assertArrayEquals(expected, buf);
++    }
++
++    // stateful read
++    ByteBuffer result = ByteBuffer.allocate(length);
++    ByteBuffer buf = ByteBuffer.allocate(1024);
++    int readLen = 0;
++    int ret;
++    try (FSDataInputStream in = fs.open(file)) {
++      while ((ret = in.read(buf)) >= 0) {
++        readLen += ret;
++        buf.flip();
++        result.put(buf);
++        buf.clear();
++      }
++    }
++    Assert.assertEquals("The length of file should be the same to write size",
++        length, readLen);
++    Assert.assertArrayEquals(expected, result.array());
++  }
++
++  private void testReadWithDNFailure(String file, int fileSize,
++      int startOffsetInFile) throws IOException {
++    final int failedDNIdx = 2;
++    Path testPath = new Path(file);
++    final byte[] bytes = StripedFileTestUtil.generateBytes(fileSize);
++    DFSTestUtil.writeFile(fs, testPath, bytes);
++
++    // shut down the DN that holds an internal data block
++    BlockLocation[] locs = fs.getFileBlockLocations(testPath, cellSize * 5,
++        cellSize);
++    String name = (locs[0].getNames())[failedDNIdx];
++    for (DataNode dn : cluster.getDataNodes()) {
++      int port = dn.getXferPort();
++      if (name.contains(Integer.toString(port))) {
++        dn.shutdown();
++        break;
++      }
++    }
++
++    // pread
++    try (FSDataInputStream fsdis = fs.open(testPath)) {
++      byte[] buf = new byte[fileSize];
++      int readLen = fsdis.read(startOffsetInFile, buf, 0, buf.length);
++      Assert.assertEquals("The fileSize of file should be the same to write size",
++          fileSize - startOffsetInFile, readLen);
++
++      byte[] expected = new byte[readLen];
++      System.arraycopy(bytes, startOffsetInFile, expected, 0,
++          fileSize - startOffsetInFile);
++
++      for (int i = startOffsetInFile; i < fileSize; i++) {
++        Assert.assertEquals("Byte at " + i + " should be the same",
++            expected[i - startOffsetInFile], buf[i - startOffsetInFile]);
++      }
++    }
++
++    // stateful read
++    ByteBuffer result = ByteBuffer.allocate(fileSize);
++    ByteBuffer buf = ByteBuffer.allocate(1024);
++    int readLen = 0;
++    int ret;
++    try (FSDataInputStream in = fs.open(testPath)) {
++      while ((ret = in.read(buf)) >= 0) {
++        readLen += ret;
++        buf.flip();
++        result.put(buf);
++        buf.clear();
++      }
++    }
++    Assert.assertEquals("The length of file should be the same to write size",
++        fileSize, readLen);
++    Assert.assertArrayEquals(bytes, result.array());
++  }
++}
+diff --git a/hadoop-hdfs-project/hadoop-hdfs/src/test/java/org/apache/hadoop/hdfs/TestWriteReadStripedFile.java b/hadoop-hdfs-project/hadoop-hdfs/src/test/java/org/apache/hadoop/hdfs/TestWriteReadStripedFile.java
+new file mode 100644
+index 0000000..272650d
+--- /dev/null
++++ b/hadoop-hdfs-project/hadoop-hdfs/src/test/java/org/apache/hadoop/hdfs/TestWriteReadStripedFile.java
+@@ -0,0 +1,370 @@
++/**
++ * Licensed to the Apache Software Foundation (ASF) under one
++ * or more contributor license agreements.  See the NOTICE file
++ * distributed with this work for additional information
++ * regarding copyright ownership.  The ASF licenses this file
++ * to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance
++ * with the License.  You may obtain a copy of the License at
++ *
++ *     http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package org.apache.hadoop.hdfs;
++
++import org.apache.commons.logging.Log;
++import org.apache.commons.logging.LogFactory;
++import org.apache.hadoop.conf.Configuration;
++import org.apache.hadoop.fs.BlockLocation;
++import org.apache.hadoop.fs.FSDataInputStream;
++import org.apache.hadoop.fs.FileStatus;
++import org.apache.hadoop.fs.FileSystem;
++import org.apache.hadoop.fs.Path;
++import org.apache.hadoop.hdfs.server.datanode.DataNode;
++import org.apache.hadoop.hdfs.web.ByteRangeInputStream;
++import org.apache.hadoop.hdfs.web.WebHdfsConstants;
++import org.apache.hadoop.hdfs.web.WebHdfsTestUtil;
++import org.junit.After;
++import org.junit.Assert;
++import org.junit.Before;
++import org.junit.Test;
++
++import java.io.EOFException;
++import java.io.IOException;
++import java.nio.ByteBuffer;
++
++import static org.apache.hadoop.hdfs.StripedFileTestUtil.blockSize;
++import static org.apache.hadoop.hdfs.StripedFileTestUtil.cellSize;
++import static org.apache.hadoop.hdfs.StripedFileTestUtil.dataBlocks;
++import static org.apache.hadoop.hdfs.StripedFileTestUtil.numDNs;
++import static org.apache.hadoop.hdfs.StripedFileTestUtil.stripesPerBlock;
++
++public class TestWriteReadStripedFile {
++  public static final Log LOG = LogFactory.getLog(TestWriteReadStripedFile.class);
++  private static MiniDFSCluster cluster;
++  private static FileSystem fs;
++  private static Configuration conf;
++
++  @Before
++  public void setup() throws IOException {
++    conf = new HdfsConfiguration();
++    conf.setLong(DFSConfigKeys.DFS_BLOCK_SIZE_KEY, blockSize);
++    cluster = new MiniDFSCluster.Builder(conf).numDataNodes(numDNs).build();
++    cluster.getFileSystem().getClient().createErasureCodingZone("/",
++        null, cellSize);
++    fs = cluster.getFileSystem();
++  }
++
++  @After
++  public void tearDown() throws IOException {
++    if (cluster != null) {
++      cluster.shutdown();
++    }
++  }
++
++  @Test
++  public void testFileEmpty() throws IOException {
++    testOneFileUsingDFSStripedInputStream("/EmptyFile", 0);
++    testOneFileUsingDFSStripedInputStream("/EmptyFile2", 0, true);
++  }
++
++  @Test
++  public void testFileSmallerThanOneCell1() throws IOException {
++    testOneFileUsingDFSStripedInputStream("/SmallerThanOneCell", 1);
++    testOneFileUsingDFSStripedInputStream("/SmallerThanOneCell2", 1, true);
++  }
++
++  @Test
++  public void testFileSmallerThanOneCell2() throws IOException {
++    testOneFileUsingDFSStripedInputStream("/SmallerThanOneCell", cellSize - 1);
++    testOneFileUsingDFSStripedInputStream("/SmallerThanOneCell2", cellSize - 1,
++        true);
++  }
++
++  @Test
++  public void testFileEqualsWithOneCell() throws IOException {
++    testOneFileUsingDFSStripedInputStream("/EqualsWithOneCell", cellSize);
++    testOneFileUsingDFSStripedInputStream("/EqualsWithOneCell2", cellSize, true);
++  }
++
++  @Test
++  public void testFileSmallerThanOneStripe1() throws IOException {
++    testOneFileUsingDFSStripedInputStream("/SmallerThanOneStripe",
++        cellSize * dataBlocks - 1);
++    testOneFileUsingDFSStripedInputStream("/SmallerThanOneStripe2",
++        cellSize * dataBlocks - 1, true);
++  }
++
++  @Test
++  public void testFileSmallerThanOneStripe2() throws IOException {
++    testOneFileUsingDFSStripedInputStream("/SmallerThanOneStripe",
++        cellSize + 123);
++    testOneFileUsingDFSStripedInputStream("/SmallerThanOneStripe2",
++        cellSize + 123, true);
++  }
++
++  @Test
++  public void testFileEqualsWithOneStripe() throws IOException {
++    testOneFileUsingDFSStripedInputStream("/EqualsWithOneStripe",
++        cellSize * dataBlocks);
++    testOneFileUsingDFSStripedInputStream("/EqualsWithOneStripe2",
++        cellSize * dataBlocks, true);
++  }
++
++  @Test
++  public void testFileMoreThanOneStripe1() throws IOException {
++    testOneFileUsingDFSStripedInputStream("/MoreThanOneStripe1",
++        cellSize * dataBlocks + 123);
++    testOneFileUsingDFSStripedInputStream("/MoreThanOneStripe12",
++        cellSize * dataBlocks + 123, true);
++  }
++
++  @Test
++  public void testFileMoreThanOneStripe2() throws IOException {
++    testOneFileUsingDFSStripedInputStream("/MoreThanOneStripe2",
++        cellSize * dataBlocks + cellSize * dataBlocks + 123);
++    testOneFileUsingDFSStripedInputStream("/MoreThanOneStripe22",
++        cellSize * dataBlocks + cellSize * dataBlocks + 123, true);
++  }
++
++  @Test
++  public void testLessThanFullBlockGroup() throws IOException {
++    testOneFileUsingDFSStripedInputStream("/LessThanFullBlockGroup",
++        cellSize * dataBlocks * (stripesPerBlock - 1) + cellSize);
++    testOneFileUsingDFSStripedInputStream("/LessThanFullBlockGroup2",
++        cellSize * dataBlocks * (stripesPerBlock - 1) + cellSize, true);
++  }
++
++  @Test
++  public void testFileFullBlockGroup() throws IOException {
++    testOneFileUsingDFSStripedInputStream("/FullBlockGroup",
++        blockSize * dataBlocks);
++    testOneFileUsingDFSStripedInputStream("/FullBlockGroup2",
++        blockSize * dataBlocks, true);
++  }
++
++  @Test
++  public void testFileMoreThanABlockGroup1() throws IOException {
++    testOneFileUsingDFSStripedInputStream("/MoreThanABlockGroup1",
++        blockSize * dataBlocks + 123);
++    testOneFileUsingDFSStripedInputStream("/MoreThanABlockGroup12",
++        blockSize * dataBlocks + 123, true);
++  }
++
++  @Test
++  public void testFileMoreThanABlockGroup2() throws IOException {
++    testOneFileUsingDFSStripedInputStream("/MoreThanABlockGroup2",
++        blockSize * dataBlocks + cellSize + 123);
++    testOneFileUsingDFSStripedInputStream("/MoreThanABlockGroup22",
++        blockSize * dataBlocks + cellSize + 123, true);
++  }
++
++
++  @Test
++  public void testFileMoreThanABlockGroup3() throws IOException {
++    testOneFileUsingDFSStripedInputStream("/MoreThanABlockGroup3",
++        blockSize * dataBlocks * 3 + cellSize * dataBlocks
++            + cellSize + 123);
++    testOneFileUsingDFSStripedInputStream("/MoreThanABlockGroup32",
++        blockSize * dataBlocks * 3 + cellSize * dataBlocks
++            + cellSize + 123, true);
++  }
++
++  private void assertSeekAndRead(FSDataInputStream fsdis, int pos,
++                                 int writeBytes) throws IOException {
++    fsdis.seek(pos);
++    byte[] buf = new byte[writeBytes];
++    int readLen = StripedFileTestUtil.readAll(fsdis, buf);
++    Assert.assertEquals(readLen, writeBytes - pos);
++    for (int i = 0; i < readLen; i++) {
++      Assert.assertEquals("Byte at " + i + " should be the same",
++          StripedFileTestUtil.getByte(pos + i), buf[i]);
++    }
++  }
++
++  private void testOneFileUsingDFSStripedInputStream(String src, int fileLength)
++      throws IOException {
++    testOneFileUsingDFSStripedInputStream(src, fileLength, false);
++  }
++
++  private void testOneFileUsingDFSStripedInputStream(String src, int fileLength,
++      boolean withDataNodeFailure) throws IOException {
++    final byte[] expected = StripedFileTestUtil.generateBytes(fileLength);
++    Path srcPath = new Path(src);
++    DFSTestUtil.writeFile(fs, srcPath, new String(expected));
++
++    verifyLength(fs, srcPath, fileLength);
++
++    if (withDataNodeFailure) {
++      int dnIndex = 1; // TODO: StripedFileTestUtil.random.nextInt(dataBlocks);
++      LOG.info("stop DataNode " + dnIndex);
++      stopDataNode(srcPath, dnIndex);
++    }
++
++    byte[] smallBuf = new byte[1024];
++    byte[] largeBuf = new byte[fileLength + 100];
++    verifyPread(fs, srcPath, fileLength, expected, largeBuf);
++
++    verifyStatefulRead(fs, srcPath, fileLength, expected, largeBuf);
++    verifySeek(fs, srcPath, fileLength);
++    verifyStatefulRead(fs, srcPath, fileLength, expected,
++        ByteBuffer.allocate(fileLength + 100));
++    verifyStatefulRead(fs, srcPath, fileLength, expected, smallBuf);
++    verifyStatefulRead(fs, srcPath, fileLength, expected,
++        ByteBuffer.allocate(1024));
++  }
++
++  private void stopDataNode(Path path, int failedDNIdx)
++      throws IOException {
++    BlockLocation[] locs = fs.getFileBlockLocations(path, 0, cellSize);
++    if (locs != null && locs.length > 0) {
++      String name = (locs[0].getNames())[failedDNIdx];
++      for (DataNode dn : cluster.getDataNodes()) {
++        int port = dn.getXferPort();
++        if (name.contains(Integer.toString(port))) {
++          dn.shutdown();
++          break;
++        }
++      }
++    }
++  }
++
++  @Test
++  public void testWriteReadUsingWebHdfs() throws Exception {
++    int fileLength = blockSize * dataBlocks + cellSize + 123;
++
++    final byte[] expected = StripedFileTestUtil.generateBytes(fileLength);
++    FileSystem fs = WebHdfsTestUtil.getWebHdfsFileSystem(conf,
++        WebHdfsConstants.WEBHDFS_SCHEME);
++    Path srcPath = new Path("/testWriteReadUsingWebHdfs_stripe");
++    DFSTestUtil.writeFile(fs, srcPath, new String(expected));
++
++    verifyLength(fs, srcPath, fileLength);
++
++    byte[] smallBuf = new byte[1024];
++    byte[] largeBuf = new byte[fileLength + 100];
++    verifyPread(fs, srcPath, fileLength, expected, largeBuf);
++
++    verifyStatefulRead(fs, srcPath, fileLength, expected, largeBuf);
++    verifySeek(fs, srcPath, fileLength);
++    verifyStatefulRead(fs, srcPath, fileLength, expected, smallBuf);
++    //webhdfs doesn't support bytebuffer read
++  }
++
++  void verifyLength(FileSystem fs, Path srcPath, int fileLength)
++      throws IOException {
++    FileStatus status = fs.getFileStatus(srcPath);
++    Assert.assertEquals("File length should be the same",
++        fileLength, status.getLen());
++  }
++
++  void verifyPread(FileSystem fs, Path srcPath,  int fileLength,
++                   byte[] expected, byte[] buf) throws IOException {
++    try (FSDataInputStream in = fs.open(srcPath)) {
++      int[] startOffsets = {0, 1, cellSize - 102, cellSize, cellSize + 102,
++          cellSize * (dataBlocks - 1), cellSize * (dataBlocks - 1) + 102,
++          cellSize * dataBlocks, fileLength - 102, fileLength - 1};
++      for (int startOffset : startOffsets) {
++        startOffset = Math.max(0, Math.min(startOffset, fileLength - 1));
++        int remaining = fileLength - startOffset;
++        in.readFully(startOffset, buf, 0, remaining);
++        for (int i = 0; i < remaining; i++) {
++          Assert.assertEquals("Byte at " + (startOffset + i) + " should be the " +
++              "same", expected[startOffset + i], buf[i]);
++        }
++      }
++    }
++  }
++
++  void verifyStatefulRead(FileSystem fs, Path srcPath, int fileLength,
++                          byte[] expected, byte[] buf) throws IOException {
++    try (FSDataInputStream in = fs.open(srcPath)) {
++      final byte[] result = new byte[fileLength];
++      int readLen = 0;
++      int ret;
++      while ((ret = in.read(buf, 0, buf.length)) >= 0) {
++        System.arraycopy(buf, 0, result, readLen, ret);
++        readLen += ret;
++      }
++      Assert.assertEquals("The length of file should be the same to write size",
++          fileLength, readLen);
++      Assert.assertArrayEquals(expected, result);
++    }
++  }
++
++
++  void verifyStatefulRead(FileSystem fs, Path srcPath, int fileLength,
++                          byte[] expected, ByteBuffer buf) throws IOException {
++    try (FSDataInputStream in = fs.open(srcPath)) {
++      ByteBuffer result = ByteBuffer.allocate(fileLength);
++      int readLen = 0;
++      int ret;
++      while ((ret = in.read(buf)) >= 0) {
++        readLen += ret;
++        buf.flip();
++        result.put(buf);
++        buf.clear();
++      }
++      Assert.assertEquals("The length of file should be the same to write size",
++          fileLength, readLen);
++      Assert.assertArrayEquals(expected, result.array());
++    }
++  }
++
++
++  void verifySeek(FileSystem fs, Path srcPath, int fileLength)
++      throws IOException {
++    try (FSDataInputStream in = fs.open(srcPath)) {
++      // seek to 1/2 of content
++      int pos = fileLength / 2;
++      assertSeekAndRead(in, pos, fileLength);
++
++      // seek to 1/3 of content
++      pos = fileLength / 3;
++      assertSeekAndRead(in, pos, fileLength);
++
++      // seek to 0 pos
++      pos = 0;
++      assertSeekAndRead(in, pos, fileLength);
++
++      if (fileLength > cellSize) {
++        // seek to cellSize boundary
++        pos = cellSize - 1;
++        assertSeekAndRead(in, pos, fileLength);
++      }
++
++      if (fileLength > cellSize * dataBlocks) {
++        // seek to striped cell group boundary
++        pos = cellSize * dataBlocks - 1;
++        assertSeekAndRead(in, pos, fileLength);
++      }
++
++      if (fileLength > blockSize * dataBlocks) {
++        // seek to striped block group boundary
++        pos = blockSize * dataBlocks - 1;
++        assertSeekAndRead(in, pos, fileLength);
++      }
++
++      if (!(in.getWrappedStream() instanceof ByteRangeInputStream)) {
++        try {
++          in.seek(-1);
++          Assert.fail("Should be failed if seek to negative offset");
++        } catch (EOFException e) {
++          // expected
++        }
++
++        try {
++          in.seek(fileLength + 1);
++          Assert.fail("Should be failed if seek after EOF");
++        } catch (EOFException e) {
++          // expected
++        }
++      }
++    }
++  }
++}
+diff --git a/hadoop-hdfs-project/hadoop-hdfs/src/test/java/org/apache/hadoop/hdfs/server/datanode/SimulatedFSDataset.java b/hadoop-hdfs-project/hadoop-hdfs/src/test/java/org/apache/hadoop/hdfs/server/datanode/SimulatedFSDataset.java
+index 6e5f07c..82b77c1 100644
+--- a/hadoop-hdfs-project/hadoop-hdfs/src/test/java/org/apache/hadoop/hdfs/server/datanode/SimulatedFSDataset.java
++++ b/hadoop-hdfs-project/hadoop-hdfs/src/test/java/org/apache/hadoop/hdfs/server/datanode/SimulatedFSDataset.java
+@@ -100,7 +100,7 @@ public static void setFactory(Configuration conf) {
+ 
+   public static byte simulatedByte(Block b, long offsetInBlk) {
+     byte firstByte = (byte) (b.getBlockId() & BYTE_MASK);
+-    return (byte) ((firstByte + offsetInBlk) & BYTE_MASK);
++    return (byte) ((firstByte + offsetInBlk % 29) & BYTE_MASK);
+   }
+   
+   public static final String CONFIG_PROPERTY_CAPACITY =
+diff --git a/hadoop-hdfs-project/hadoop-hdfs/src/test/java/org/apache/hadoop/hdfs/server/datanode/TestIncrementalBrVariations.java b/hadoop-hdfs-project/hadoop-hdfs/src/test/java/org/apache/hadoop/hdfs/server/datanode/TestIncrementalBrVariations.java
+index 989e216..d8c651f 100644
+--- a/hadoop-hdfs-project/hadoop-hdfs/src/test/java/org/apache/hadoop/hdfs/server/datanode/TestIncrementalBrVariations.java
++++ b/hadoop-hdfs-project/hadoop-hdfs/src/test/java/org/apache/hadoop/hdfs/server/datanode/TestIncrementalBrVariations.java
+@@ -227,15 +227,6 @@ private static Block getDummyBlock() {
+     return new Block(10000000L, 100L, 1048576L);
+   }
+ 
+-  private static StorageReceivedDeletedBlocks[] makeReportForReceivedBlock(
+-      Block block, DatanodeStorage storage) {
+-    ReceivedDeletedBlockInfo[] receivedBlocks = new ReceivedDeletedBlockInfo[1];
+-    receivedBlocks[0] = new ReceivedDeletedBlockInfo(block, BlockStatus.RECEIVED_BLOCK, null);
+-    StorageReceivedDeletedBlocks[] reports = new StorageReceivedDeletedBlocks[1];
+-    reports[0] = new StorageReceivedDeletedBlocks(storage, receivedBlocks);
+-    return reports;
+-  }
+-
+   /**
+    * Verify that the NameNode can learn about new storages from incremental
+    * block reports.
+@@ -251,8 +242,9 @@ public void testNnLearnsNewStorages()
+     // Generate a report for a fake block on a fake storage.
+     final String newStorageUuid = UUID.randomUUID().toString();
+     final DatanodeStorage newStorage = new DatanodeStorage(newStorageUuid);
+-    StorageReceivedDeletedBlocks[] reports = makeReportForReceivedBlock(
+-        getDummyBlock(), newStorage);
++    StorageReceivedDeletedBlocks[] reports = DFSTestUtil.
++        makeReportForReceivedBlock(getDummyBlock(), BlockStatus.RECEIVED_BLOCK,
++            newStorage);
+ 
+     // Send the report to the NN.
+     cluster.getNameNodeRpc().blockReceivedAndDeleted(dn0Reg, poolId, reports);
+diff --git a/hadoop-hdfs-project/hadoop-hdfs/src/test/java/org/apache/hadoop/hdfs/util/TestStripedBlockUtil.java b/hadoop-hdfs-project/hadoop-hdfs/src/test/java/org/apache/hadoop/hdfs/util/TestStripedBlockUtil.java
+new file mode 100644
+index 0000000..5d85073
+--- /dev/null
++++ b/hadoop-hdfs-project/hadoop-hdfs/src/test/java/org/apache/hadoop/hdfs/util/TestStripedBlockUtil.java
+@@ -0,0 +1,279 @@
++/**
++ * Licensed to the Apache Software Foundation (ASF) under one
++ * or more contributor license agreements.  See the NOTICE file
++ * distributed with this work for additional information
++ * regarding copyright ownership.  The ASF licenses this file
++ * to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance
++ * with the License.  You may obtain a copy of the License at
++ *
++ *     http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++package org.apache.hadoop.hdfs.util;
++
++import com.google.common.base.Preconditions;
++import org.apache.hadoop.fs.StorageType;
++import org.apache.hadoop.hdfs.DFSTestUtil;
++import org.apache.hadoop.hdfs.protocol.DatanodeInfo;
++import org.apache.hadoop.hdfs.protocol.ExtendedBlock;
++import org.apache.hadoop.hdfs.protocol.HdfsConstants;
++import org.apache.hadoop.hdfs.protocol.LocatedBlock;
++import org.apache.hadoop.hdfs.protocol.LocatedStripedBlock;
++import org.apache.hadoop.hdfs.server.blockmanagement.BlockIdManager;
++import static org.apache.hadoop.hdfs.util.StripedBlockUtil.*;
++
++import org.apache.hadoop.hdfs.server.namenode.ErasureCodingSchemaManager;
++import org.apache.hadoop.io.erasurecode.ECSchema;
++import org.junit.Before;
++import org.junit.Test;
++
++import java.util.Random;
++
++import static org.junit.Assert.assertEquals;
++import static org.junit.Assert.assertFalse;
++
++/**
++ * Need to cover the following combinations:
++ * 1. Block group size:
++ *  1.1 One byte
++ *  1.2 Smaller than cell
++ *  1.3 One full cell
++ *  1.4 x full cells, where x is smaller than number of data blocks
++ *  1.5 x full cells plus a partial cell
++ *  1.6 One full stripe
++ *  1.7 One full stripe plus a partial cell
++ *  1.8 One full stripe plus x full cells
++ *  1.9 One full stripe plus x full cells plus a partial cell
++ *  1.10 y full stripes, but smaller than full block group size
++ *  1.11 Full block group size
++ *
++ * 2. Byte range start
++ *  2.1 Zero
++ *  2.2 Within first cell
++ *  2.3 End of first cell
++ *  2.4 Start of a middle* cell in the first stripe (* neither first or last)
++ *  2.5 End of middle cell in the first stripe
++ *  2.6 Within a middle cell in the first stripe
++ *  2.7 Start of the last cell in the first stripe
++ *  2.8 Within the last cell in the first stripe
++ *  2.9 End of the last cell in the first stripe
++ *  2.10 Start of a middle stripe
++ *  2.11 Within a middle stripe
++ *  2.12 End of a middle stripe
++ *  2.13 Start of the last stripe
++ *  2.14 Within the last stripe
++ *  2.15 End of the last stripe (last byte)
++ *
++ * 3. Byte range length: same settings as block group size
++ *
++ * We should test in total 11 x 15 x 11 = 1815 combinations
++ * TODO: test parity block logic
++ */
++public class TestStripedBlockUtil {
++  private final short DATA_BLK_NUM = HdfsConstants.NUM_DATA_BLOCKS;
++  private final short PARITY_BLK_NUM = HdfsConstants.NUM_PARITY_BLOCKS;
++  private final short BLK_GROUP_WIDTH = DATA_BLK_NUM + PARITY_BLK_NUM;
++  private final int CELLSIZE = HdfsConstants.BLOCK_STRIPED_CELL_SIZE;
++  private final int FULL_STRIPE_SIZE = DATA_BLK_NUM * CELLSIZE;
++  /** number of full stripes in a full block group */
++  private final int BLK_GROUP_STRIPE_NUM = 16;
++  private final ECSchema SCEHMA = ErasureCodingSchemaManager.
++      getSystemDefaultSchema();
++  private final Random random = new Random();
++
++  private int[] blockGroupSizes;
++  private int[] byteRangeStartOffsets;
++  private int[] byteRangeSizes;
++
++  @Before
++  public void setup(){
++    blockGroupSizes = new int[]{1, getDelta(CELLSIZE), CELLSIZE,
++        getDelta(DATA_BLK_NUM) * CELLSIZE,
++        getDelta(DATA_BLK_NUM) * CELLSIZE + getDelta(CELLSIZE),
++        FULL_STRIPE_SIZE, FULL_STRIPE_SIZE + getDelta(CELLSIZE),
++        FULL_STRIPE_SIZE + getDelta(DATA_BLK_NUM) * CELLSIZE,
++        FULL_STRIPE_SIZE + getDelta(DATA_BLK_NUM) * CELLSIZE + getDelta(CELLSIZE),
++        getDelta(BLK_GROUP_STRIPE_NUM) * FULL_STRIPE_SIZE,
++        BLK_GROUP_STRIPE_NUM * FULL_STRIPE_SIZE};
++    byteRangeStartOffsets = new int[] {0, getDelta(CELLSIZE), CELLSIZE - 1};
++    byteRangeSizes = new int[]{1, getDelta(CELLSIZE), CELLSIZE,
++        getDelta(DATA_BLK_NUM) * CELLSIZE,
++        getDelta(DATA_BLK_NUM) * CELLSIZE + getDelta(CELLSIZE),
++        FULL_STRIPE_SIZE, FULL_STRIPE_SIZE + getDelta(CELLSIZE),
++        FULL_STRIPE_SIZE + getDelta(DATA_BLK_NUM) * CELLSIZE,
++        FULL_STRIPE_SIZE + getDelta(DATA_BLK_NUM) * CELLSIZE + getDelta(CELLSIZE),
++        getDelta(BLK_GROUP_STRIPE_NUM) * FULL_STRIPE_SIZE,
++        BLK_GROUP_STRIPE_NUM * FULL_STRIPE_SIZE};
++  }
++
++  private int getDelta(int size) {
++    return 1 + random.nextInt(size - 2);
++  }
++  private byte hashIntToByte(int i) {
++    int BYTE_MASK = 0xff;
++    return (byte) (((i + 13) * 29) & BYTE_MASK);
++  }
++
++  private LocatedStripedBlock createDummyLocatedBlock(int bgSize) {
++    final long blockGroupID = -1048576;
++    DatanodeInfo[] locs = new DatanodeInfo[BLK_GROUP_WIDTH];
++    String[] storageIDs = new String[BLK_GROUP_WIDTH];
++    StorageType[] storageTypes = new StorageType[BLK_GROUP_WIDTH];
++    int[] indices = new int[BLK_GROUP_WIDTH];
++    for (int i = 0; i < BLK_GROUP_WIDTH; i++) {
++      indices[i] = (i + 2) % DATA_BLK_NUM;
++      // Location port always equal to logical index of a block,
++      // for easier verification
++      locs[i] = DFSTestUtil.getLocalDatanodeInfo(indices[i]);
++      storageIDs[i] = locs[i].getDatanodeUuid();
++      storageTypes[i] = StorageType.DISK;
++    }
++    return new LocatedStripedBlock(new ExtendedBlock("pool", blockGroupID,
++        bgSize, 1001), locs, storageIDs, storageTypes, indices, 0, false,
++        null);
++  }
++
++  private byte[][] createInternalBlkBuffers(int bgSize) {
++    byte[][] bufs = new byte[DATA_BLK_NUM + PARITY_BLK_NUM][];
++    int[] pos = new int[DATA_BLK_NUM + PARITY_BLK_NUM];
++    for (int i = 0; i < DATA_BLK_NUM + PARITY_BLK_NUM; i++) {
++      int bufSize = (int) getInternalBlockLength(
++          bgSize, CELLSIZE, DATA_BLK_NUM, i);
++      bufs[i] = new byte[bufSize];
++      pos[i] = 0;
++    }
++    int done = 0;
++    while (done < bgSize) {
++      Preconditions.checkState(done % CELLSIZE == 0);
++      StripingCell cell = new StripingCell(SCEHMA, CELLSIZE, done / CELLSIZE, 0);
++      int idxInStripe = cell.idxInStripe;
++      int size = Math.min(CELLSIZE, bgSize - done);
++      for (int i = 0; i < size; i++) {
++        bufs[idxInStripe][pos[idxInStripe] + i] = hashIntToByte(done + i);
++      }
++      done += size;
++      pos[idxInStripe] += size;
++    }
++
++    return bufs;
++  }
++
++  @Test
++  public void testParseDummyStripedBlock() {
++    LocatedStripedBlock lsb = createDummyLocatedBlock(
++        BLK_GROUP_STRIPE_NUM * FULL_STRIPE_SIZE);
++    LocatedBlock[] blocks = parseStripedBlockGroup(
++        lsb, CELLSIZE, DATA_BLK_NUM, PARITY_BLK_NUM);
++    assertEquals(DATA_BLK_NUM + PARITY_BLK_NUM, blocks.length);
++    for (int i = 0; i < DATA_BLK_NUM; i++) {
++      assertFalse(blocks[i].isStriped());
++      assertEquals(i,
++          BlockIdManager.getBlockIndex(blocks[i].getBlock().getLocalBlock()));
++      assertEquals(0, blocks[i].getStartOffset());
++      assertEquals(1, blocks[i].getLocations().length);
++      assertEquals(i, blocks[i].getLocations()[0].getIpcPort());
++      assertEquals(i, blocks[i].getLocations()[0].getXferPort());
++    }
++  }
++
++  private void verifyInternalBlocks (int numBytesInGroup, int[] expected) {
++    for (int i = 1; i < BLK_GROUP_WIDTH; i++) {
++      assertEquals(expected[i],
++          getInternalBlockLength(numBytesInGroup, CELLSIZE, DATA_BLK_NUM, i));
++    }
++  }
++
++  @Test
++  public void testGetInternalBlockLength () {
++    // A small delta that is smaller than a cell
++    final int delta = 10;
++
++    // Block group is smaller than a cell
++    verifyInternalBlocks(CELLSIZE - delta,
++        new int[] {CELLSIZE - delta, 0, 0, 0, 0, 0,
++            CELLSIZE - delta, CELLSIZE - delta, CELLSIZE - delta});
++
++    // Block group is exactly as large as a cell
++    verifyInternalBlocks(CELLSIZE,
++        new int[] {CELLSIZE, 0, 0, 0, 0, 0,
++            CELLSIZE, CELLSIZE, CELLSIZE});
++
++    // Block group is a little larger than a cell
++    verifyInternalBlocks(CELLSIZE + delta,
++        new int[] {CELLSIZE, delta, 0, 0, 0, 0,
++            CELLSIZE, CELLSIZE, CELLSIZE});
++
++    // Block group contains multiple stripes and ends at stripe boundary
++    verifyInternalBlocks(2 * DATA_BLK_NUM * CELLSIZE,
++        new int[] {2 * CELLSIZE, 2 * CELLSIZE, 2 * CELLSIZE,
++            2 * CELLSIZE, 2 * CELLSIZE, 2 * CELLSIZE,
++            2 * CELLSIZE, 2 * CELLSIZE, 2 * CELLSIZE});
++
++    // Block group contains multiple stripes and ends at cell boundary
++    // (not ending at stripe boundary)
++    verifyInternalBlocks(2 * DATA_BLK_NUM * CELLSIZE + CELLSIZE,
++        new int[] {3 * CELLSIZE, 2 * CELLSIZE, 2 * CELLSIZE,
++            2 * CELLSIZE, 2 * CELLSIZE, 2 * CELLSIZE,
++            3 * CELLSIZE, 3 * CELLSIZE, 3 * CELLSIZE});
++
++    // Block group contains multiple stripes and doesn't end at cell boundary
++    verifyInternalBlocks(2 * DATA_BLK_NUM * CELLSIZE - delta,
++        new int[] {2 * CELLSIZE, 2 * CELLSIZE, 2 * CELLSIZE,
++            2 * CELLSIZE, 2 * CELLSIZE, 2 * CELLSIZE - delta,
++            2 * CELLSIZE, 2 * CELLSIZE, 2 * CELLSIZE});
++  }
++
++  /**
++   * Test dividing a byte range into aligned stripes and verify the aligned
++   * ranges can be translated back to the byte range.
++   */
++  @Test
++  public void testDivideByteRangeIntoStripes() {
++    byte[] assembled = new byte[BLK_GROUP_STRIPE_NUM * FULL_STRIPE_SIZE];
++    for (int bgSize : blockGroupSizes) {
++      LocatedStripedBlock blockGroup = createDummyLocatedBlock(bgSize);
++      byte[][] internalBlkBufs = createInternalBlkBuffers(bgSize);
++      for (int brStart : byteRangeStartOffsets) {
++        for (int brSize : byteRangeSizes) {
++          if (brStart + brSize > bgSize) {
++            continue;
++          }
++          AlignedStripe[] stripes = divideByteRangeIntoStripes(SCEHMA,
++              CELLSIZE, blockGroup, brStart, brStart + brSize - 1, assembled, 0);
++
++          for (AlignedStripe stripe : stripes) {
++            for (int i = 0; i < DATA_BLK_NUM; i++) {
++              StripingChunk chunk = stripe.chunks[i];
++              if (chunk == null || chunk.state != StripingChunk.REQUESTED) {
++                continue;
++              }
++              int done = 0;
++              for (int j = 0; j < chunk.byteArray.getLengths().length; j++) {
++                System.arraycopy(internalBlkBufs[i],
++                    (int) stripe.getOffsetInBlock() + done, assembled,
++                    chunk.byteArray.getOffsets()[j],
++                    chunk.byteArray.getLengths()[j]);
++                done += chunk.byteArray.getLengths()[j];
++              }
++            }
++          }
++          for (int i = 0; i < brSize; i++) {
++            if (hashIntToByte(brStart + i) != assembled[i]) {
++              System.out.println("Oops");
++            }
++            assertEquals("Byte at " + (brStart + i) + " should be the same",
++                hashIntToByte(brStart + i), assembled[i]);
++          }
++        }
++      }
++    }
++  }
++
++}

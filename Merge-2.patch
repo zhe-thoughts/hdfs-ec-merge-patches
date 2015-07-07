@@ -1,5 +1,5 @@
 diff --git a/hadoop-hdfs-project/hadoop-hdfs-client/src/main/java/org/apache/hadoop/hdfs/protocol/ClientProtocol.java b/hadoop-hdfs-project/hadoop-hdfs-client/src/main/java/org/apache/hadoop/hdfs/protocol/ClientProtocol.java
-index ab41911..74a67af 100644
+index 381be30..104c694 100644
 --- a/hadoop-hdfs-project/hadoop-hdfs-client/src/main/java/org/apache/hadoop/hdfs/protocol/ClientProtocol.java
 +++ b/hadoop-hdfs-project/hadoop-hdfs-client/src/main/java/org/apache/hadoop/hdfs/protocol/ClientProtocol.java
 @@ -53,6 +53,7 @@
@@ -10,10 +10,10 @@ index ab41911..74a67af 100644
  import org.apache.hadoop.io.retry.AtMostOnce;
  import org.apache.hadoop.io.retry.Idempotent;
  import org.apache.hadoop.security.AccessControlException;
-@@ -1457,4 +1458,30 @@ public void setXAttr(String src, XAttr xAttr, EnumSet<XAttrSetFlag> flag)
+@@ -1417,4 +1418,30 @@ void setXAttr(String src, XAttr xAttr, EnumSet<XAttrSetFlag> flag)
     */
    @Idempotent
-   public EventBatchList getEditsFromTxid(long txid) throws IOException;
+   EventBatchList getEditsFromTxid(long txid) throws IOException;
 +
 +  /**
 +   * Create an erasure coding zone with specified schema, if any, otherwise

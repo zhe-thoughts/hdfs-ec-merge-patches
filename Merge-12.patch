@@ -1,5 +1,5 @@
 diff --git a/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/namenode/FSEditLogLoader.java b/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/namenode/FSEditLogLoader.java
-index f7f6e9c..d12d27a 100644
+index 22d6fd4..d12d27a 100644
 --- a/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/namenode/FSEditLogLoader.java
 +++ b/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/namenode/FSEditLogLoader.java
 @@ -36,6 +36,7 @@
@@ -95,7 +95,7 @@ index f7f6e9c..d12d27a 100644
      // add the new block
 -    BlockInfo newBI = new BlockInfoUnderConstructionContiguous(
 -          newBlock, file.getPreferredBlockReplication());
--    fsNamesys.getBlockManager().addBlockCollection(newBI, file);
+-    fsNamesys.getBlockManager().addBlockCollectionWithCheck(newBI, file);
 -    file.addBlock(newBI);
 +    final BlockInfo newBlockInfo;
 +    boolean isStriped = ecZone != null;
@@ -121,7 +121,7 @@ index f7f6e9c..d12d27a 100644
      // Update its block list
      BlockInfo[] oldBlocks = file.getBlocks();
      Block[] newBlocks = op.getBlocks();
-@@ -1050,25 +1070,38 @@ private void updateBlocks(FSDirectory fsDir, BlockListUpdatingOp op,
+@@ -1050,23 +1070,36 @@ private void updateBlocks(FSDirectory fsDir, BlockListUpdatingOp op,
          throw new IOException("Trying to delete non-existant block " + oldBlock);
        }
      } else if (newBlocks.length > oldBlocks.length) {
@@ -161,11 +161,8 @@ index f7f6e9c..d12d27a 100644
 +                file.getPreferredBlockReplication());
 +          }
          }
--        fsNamesys.getBlockManager().addBlockCollection(newBI, file);
-+        fsNamesys.getBlockManager().addBlockCollectionWithCheck(newBI, file);
+         fsNamesys.getBlockManager().addBlockCollectionWithCheck(newBI, file);
          file.addBlock(newBI);
-         fsNamesys.getBlockManager().processQueuedMessagesForBlock(newBlock);
-       }
 diff --git a/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/namenode/FSImageFormat.java b/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/namenode/FSImageFormat.java
 index 2f85021..b79d689 100644
 --- a/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/namenode/FSImageFormat.java
@@ -346,3 +343,685 @@ index 344c257..5bb1c32 100644
    }
  
    message QuotaByStorageTypeEntryProto {
+diff --git a/hadoop-hdfs-project/hadoop-hdfs/src/test/java/org/apache/hadoop/hdfs/server/namenode/TestFSEditLogLoader.java b/hadoop-hdfs-project/hadoop-hdfs/src/test/java/org/apache/hadoop/hdfs/server/namenode/TestFSEditLogLoader.java
+index 55ba379..5810f40 100644
+--- a/hadoop-hdfs-project/hadoop-hdfs/src/test/java/org/apache/hadoop/hdfs/server/namenode/TestFSEditLogLoader.java
++++ b/hadoop-hdfs-project/hadoop-hdfs/src/test/java/org/apache/hadoop/hdfs/server/namenode/TestFSEditLogLoader.java
+@@ -39,15 +39,23 @@
+ import org.apache.hadoop.conf.Configuration;
+ import org.apache.hadoop.fs.FileSystem;
+ import org.apache.hadoop.fs.Path;
++import org.apache.hadoop.fs.permission.FsPermission;
+ import org.apache.hadoop.hdfs.DFSConfigKeys;
+ import org.apache.hadoop.hdfs.DFSTestUtil;
+ import org.apache.hadoop.hdfs.HdfsConfiguration;
+ import org.apache.hadoop.hdfs.MiniDFSCluster;
++import org.apache.hadoop.hdfs.server.blockmanagement.BlockInfo;
+ import org.apache.hadoop.hdfs.server.common.HdfsServerConstants;
++import org.apache.hadoop.hdfs.DistributedFileSystem;
++import org.apache.hadoop.hdfs.protocol.HdfsConstants;
++import org.apache.hadoop.hdfs.server.blockmanagement.BlockInfoContiguous;
+ import org.apache.hadoop.hdfs.server.common.Storage.StorageDirectory;
+ import org.apache.hadoop.hdfs.server.namenode.FSEditLogLoader.EditLogValidation;
+ import org.apache.hadoop.hdfs.server.namenode.NNStorage.NameNodeDirType;
++import org.apache.hadoop.hdfs.server.blockmanagement.BlockInfoStriped;
++import org.apache.hadoop.hdfs.protocol.Block;
+ import org.apache.hadoop.io.IOUtils;
++import org.apache.hadoop.io.erasurecode.ECSchema;
+ import org.apache.hadoop.test.PathUtils;
+ import org.apache.log4j.Level;
+ import org.junit.Test;
+@@ -65,6 +73,9 @@
+   private static final File TEST_DIR = PathUtils.getTestDir(TestFSEditLogLoader.class);
+ 
+   private static final int NUM_DATA_NODES = 0;
++
++  private static final ECSchema testSchema
++      = ErasureCodingSchemaManager.getSystemDefaultSchema();
+   
+   @Test
+   public void testDisplayRecentEditLogOpCodes() throws IOException {
+@@ -414,4 +425,265 @@ public void testFSEditLogOpCodes() throws IOException {
+           fromByte(code), FSEditLogOpCodes.fromByte(code));
+     }
+   }
++
++  @Test
++  public void testAddNewStripedBlock() throws IOException{
++    // start a cluster
++    Configuration conf = new HdfsConfiguration();
++    MiniDFSCluster cluster = null;
++    try {
++      cluster = new MiniDFSCluster.Builder(conf).numDataNodes(9)
++          .build();
++      cluster.waitActive();
++      DistributedFileSystem fs = cluster.getFileSystem();
++      FSNamesystem fns = cluster.getNamesystem();
++
++      String testDir = "/ec";
++      String testFile = "testfile_001";
++      String testFilePath = testDir + "/" + testFile;
++      String clientName = "testUser1";
++      String clientMachine = "testMachine1";
++      long blkId = 1;
++      long blkNumBytes = 1024;
++      long timestamp = 1426222918;
++      short blockNum = HdfsConstants.NUM_DATA_BLOCKS;
++      short parityNum = HdfsConstants.NUM_PARITY_BLOCKS;
++      int cellSize = HdfsConstants.BLOCK_STRIPED_CELL_SIZE;
++
++      //set the storage policy of the directory
++      fs.mkdir(new Path(testDir), new FsPermission("755"));
++      fs.getClient().getNamenode().createErasureCodingZone(testDir, null, 0);
++
++      // Create a file with striped block
++      Path p = new Path(testFilePath);
++      DFSTestUtil.createFile(fs, p, 0, (short) 1, 1);
++
++      fns.enterSafeMode(false);
++      fns.saveNamespace(0, 0);
++      fns.leaveSafeMode();
++
++      // Add a striped block to the file
++      BlockInfoStriped stripedBlk = new BlockInfoStriped(
++          new Block(blkId, blkNumBytes, timestamp), testSchema, cellSize);
++      INodeFile file = (INodeFile)fns.getFSDirectory().getINode(testFilePath);
++      file.toUnderConstruction(clientName, clientMachine);
++      file.getStripedBlocksFeature().addBlock(stripedBlk);
++      fns.getEditLog().logAddBlock(testFilePath, file);
++      file.toCompleteFile(System.currentTimeMillis());
++
++      //If the block by loaded is the same as above it means that
++      //we have successfully applied the edit log to the fsimage.
++      cluster.restartNameNodes();
++      cluster.waitActive();
++      fns = cluster.getNamesystem();
++
++      INodeFile inodeLoaded = (INodeFile)fns.getFSDirectory()
++          .getINode(testFilePath);
++
++      assertTrue(inodeLoaded.isStriped());
++
++      BlockInfo[] blks = inodeLoaded.getBlocks();
++      assertEquals(1, blks.length);
++      assertTrue(blks[0].isStriped());
++      assertEquals(blkId, blks[0].getBlockId());
++      assertEquals(blkNumBytes, blks[0].getNumBytes());
++      assertEquals(timestamp, blks[0].getGenerationStamp());
++      assertEquals(blockNum, blks[0].getStripedBlockStorageOp().getDataBlockNum());
++      assertEquals(parityNum, blks[0].getStripedBlockStorageOp().getParityBlockNum());
++      assertEquals(cellSize, blks[0].getStripedBlockStorageOp().getCellSize());
++
++      cluster.shutdown();
++      cluster = null;
++    } finally {
++      if (cluster != null) {
++        cluster.shutdown();
++      }
++    }
++  }
++
++  @Test
++  public void testUpdateStripedBlocks() throws IOException{
++    // start a cluster
++    Configuration conf = new HdfsConfiguration();
++    MiniDFSCluster cluster = null;
++    try {
++      cluster = new MiniDFSCluster.Builder(conf).numDataNodes(9)
++          .build();
++      cluster.waitActive();
++      DistributedFileSystem fs = cluster.getFileSystem();
++      FSNamesystem fns = cluster.getNamesystem();
++
++      String testDir = "/ec";
++      String testFile = "testfile_002";
++      String testFilePath = testDir + "/" + testFile;
++      String clientName = "testUser2";
++      String clientMachine = "testMachine2";
++      long blkId = 1;
++      long blkNumBytes = 1024;
++      long timestamp = 1426222918;
++      short blockNum = HdfsConstants.NUM_DATA_BLOCKS;
++      short parityNum = HdfsConstants.NUM_PARITY_BLOCKS;
++      int cellSize = HdfsConstants.BLOCK_STRIPED_CELL_SIZE;
++
++      //set the storage policy of the directory
++      fs.mkdir(new Path(testDir), new FsPermission("755"));
++      fs.getClient().getNamenode().createErasureCodingZone(testDir, null, 0);
++
++      //create a file with striped blocks
++      Path p = new Path(testFilePath);
++      DFSTestUtil.createFile(fs, p, 0, (short) 1, 1);
++      BlockInfoStriped stripedBlk = new BlockInfoStriped(
++          new Block(blkId, blkNumBytes, timestamp), testSchema, cellSize);
++      INodeFile file = (INodeFile)fns.getFSDirectory().getINode(testFilePath);
++      file.toUnderConstruction(clientName, clientMachine);
++      file.getStripedBlocksFeature().addBlock(stripedBlk);
++      fns.getEditLog().logAddBlock(testFilePath, file);
++      file.toCompleteFile(System.currentTimeMillis());
++      fns.enterSafeMode(false);
++      fns.saveNamespace(0, 0);
++      fns.leaveSafeMode();
++
++      //update the last block
++      long newBlkNumBytes = 1024*8;
++      long newTimestamp = 1426222918+3600;
++      file.toUnderConstruction(clientName, clientMachine);
++      file.getLastBlock().setNumBytes(newBlkNumBytes);
++      file.getLastBlock().setGenerationStamp(newTimestamp);
++      fns.getEditLog().logUpdateBlocks(testFilePath, file, true);
++      file.toCompleteFile(System.currentTimeMillis());
++
++      //After the namenode restarts if the block by loaded is the same as above
++      //(new block size and timestamp) it means that we have successfully
++      //applied the edit log to the fsimage.
++      cluster.restartNameNodes();
++      cluster.waitActive();
++      fns = cluster.getNamesystem();
++
++      INodeFile inodeLoaded = (INodeFile)fns.getFSDirectory()
++          .getINode(testFilePath);
++
++      assertTrue(inodeLoaded.isStriped());
++
++      BlockInfo[] blks = inodeLoaded.getBlocks();
++      assertEquals(1, blks.length);
++      assertTrue(blks[0].isStriped());
++      assertEquals(blkId, blks[0].getBlockId());
++      assertEquals(newBlkNumBytes, blks[0].getNumBytes());
++      assertEquals(newTimestamp, blks[0].getGenerationStamp());
++      assertEquals(blockNum, blks[0].getStripedBlockStorageOp().getDataBlockNum());
++      assertEquals(parityNum, blks[0].getStripedBlockStorageOp().getParityBlockNum());
++      assertEquals(cellSize, blks[0].getStripedBlockStorageOp().getCellSize());
++
++      cluster.shutdown();
++      cluster = null;
++    } finally {
++      if (cluster != null) {
++        cluster.shutdown();
++      }
++    }
++  }
++
++  @Test
++  public void testHasNonEcBlockUsingStripedIDForAddBlock() throws IOException{
++    // start a cluster
++    Configuration conf = new HdfsConfiguration();
++    MiniDFSCluster cluster = null;
++    try {
++      cluster = new MiniDFSCluster.Builder(conf).numDataNodes(9)
++          .build();
++      cluster.waitActive();
++      DistributedFileSystem fs = cluster.getFileSystem();
++      FSNamesystem fns = cluster.getNamesystem();
++
++      String testDir = "/test_block_manager";
++      String testFile = "testfile_addblock";
++      String testFilePath = testDir + "/" + testFile;
++      String clientName = "testUser_addblock";
++      String clientMachine = "testMachine_addblock";
++      long blkId = -1;
++      long blkNumBytes = 1024;
++      long timestamp = 1426222918;
++
++      fs.mkdir(new Path(testDir), new FsPermission("755"));
++      Path p = new Path(testFilePath);
++
++      //check whether the hasNonEcBlockUsingStripedID is set
++      //after loading a addblock-editlog
++      DFSTestUtil.createFile(fs, p, 0, (short) 1, 1);
++      BlockInfoContiguous cBlk = new BlockInfoContiguous(
++          new Block(blkId, blkNumBytes, timestamp), (short)3);
++      INodeFile file = (INodeFile)fns.getFSDirectory().getINode(testFilePath);
++      file.toUnderConstruction(clientName, clientMachine);
++      file.addBlock(cBlk);
++      fns.getEditLog().logAddBlock(testFilePath, file);
++      file.toCompleteFile(System.currentTimeMillis());
++      cluster.restartNameNodes();
++      cluster.waitActive();
++      fns = cluster.getNamesystem();
++      assertTrue(fns.getBlockManager().hasNonEcBlockUsingStripedID());
++
++      cluster.shutdown();
++      cluster = null;
++    } finally {
++      if (cluster != null) {
++        cluster.shutdown();
++      }
++    }
++  }
++
++  @Test
++  public void testHasNonEcBlockUsingStripedIDForUpdateBlocks()
++      throws IOException{
++    // start a cluster
++    Configuration conf = new HdfsConfiguration();
++    MiniDFSCluster cluster = null;
++    try {
++      cluster = new MiniDFSCluster.Builder(conf).numDataNodes(9)
++          .build();
++      cluster.waitActive();
++      DistributedFileSystem fs = cluster.getFileSystem();
++      FSNamesystem fns = cluster.getNamesystem();
++
++      String testDir = "/test_block_manager";
++      String testFile = "testfile_002";
++      String testFilePath = testDir + "/" + testFile;
++      String clientName = "testUser2";
++      String clientMachine = "testMachine1";
++      long blkId = 100;
++      long blkNumBytes = 1024;
++      long timestamp = 1426222918;
++
++      fs.mkdir(new Path(testDir), new FsPermission("755"));
++      Path p = new Path(testFilePath);
++
++      DFSTestUtil.createFile(fs, p, 0, (short) 1, 1);
++      BlockInfoContiguous cBlk = new BlockInfoContiguous(
++          new Block(blkId, blkNumBytes, timestamp), (short)3);
++      INodeFile file = (INodeFile)fns.getFSDirectory().getINode(testFilePath);
++      file.toUnderConstruction(clientName, clientMachine);
++      file.addBlock(cBlk);
++      file.toCompleteFile(System.currentTimeMillis());
++
++      long newBlkNumBytes = 1024*8;
++      long newTimestamp = 1426222918+3600;
++      file.toUnderConstruction(clientName, clientMachine);
++      file.getLastBlock().setBlockId(-100);
++      file.getLastBlock().setNumBytes(newBlkNumBytes);
++      file.getLastBlock().setGenerationStamp(newTimestamp);
++      fns.getEditLog().logUpdateBlocks(testFilePath, file, true);
++      file.toCompleteFile(System.currentTimeMillis());
++      cluster.restartNameNodes();
++      cluster.waitActive();
++      fns = cluster.getNamesystem();
++      assertTrue(fns.getBlockManager().hasNonEcBlockUsingStripedID());
++
++      cluster.shutdown();
++      cluster = null;
++    } finally {
++      if (cluster != null) {
++        cluster.shutdown();
++      }
++    }
++  }
++
+ }
+diff --git a/hadoop-hdfs-project/hadoop-hdfs/src/test/java/org/apache/hadoop/hdfs/server/namenode/TestFSImage.java b/hadoop-hdfs-project/hadoop-hdfs/src/test/java/org/apache/hadoop/hdfs/server/namenode/TestFSImage.java
+index df20fd6..fabe838 100644
+--- a/hadoop-hdfs-project/hadoop-hdfs/src/test/java/org/apache/hadoop/hdfs/server/namenode/TestFSImage.java
++++ b/hadoop-hdfs-project/hadoop-hdfs/src/test/java/org/apache/hadoop/hdfs/server/namenode/TestFSImage.java
+@@ -17,14 +17,23 @@
+  */
+ package org.apache.hadoop.hdfs.server.namenode;
+ 
+-import static org.junit.Assert.assertEquals;
+-import static org.junit.Assert.assertFalse;
+-import static org.junit.Assert.assertTrue;
+-
++import java.io.ByteArrayInputStream;
++import java.io.ByteArrayOutputStream;
++import java.io.DataInput;
++import java.io.DataInputStream;
++import java.io.DataOutput;
++import java.io.DataOutputStream;
+ import java.io.File;
+ import java.io.IOException;
+ import java.util.EnumSet;
+ 
++import org.apache.hadoop.fs.permission.FsPermission;
++import org.apache.hadoop.fs.permission.PermissionStatus;
++import org.apache.hadoop.hdfs.DFSTestUtil;
++import org.apache.hadoop.hdfs.protocol.Block;
++import org.apache.hadoop.hdfs.server.blockmanagement.BlockInfoContiguous;
++import org.apache.hadoop.hdfs.server.blockmanagement.BlockInfoStriped;
++import org.apache.hadoop.io.erasurecode.ECSchema;
+ import org.junit.Assert;
+ 
+ import org.apache.hadoop.conf.Configuration;
+@@ -50,10 +59,16 @@
+ import org.apache.hadoop.test.PathUtils;
+ import org.junit.Test;
+ 
++import static org.junit.Assert.*;
++
+ public class TestFSImage {
+ 
+   private static final String HADOOP_2_7_ZER0_BLOCK_SIZE_TGZ =
+       "image-with-zero-block-size.tar.gz";
++  private static final ECSchema testSchema
++      = ErasureCodingSchemaManager.getSystemDefaultSchema();
++  private static final int cellSize = HdfsConstants.BLOCK_STRIPED_CELL_SIZE;
++
+   @Test
+   public void testPersist() throws IOException {
+     Configuration conf = new Configuration();
+@@ -274,4 +289,328 @@ public void testZeroBlockSize() throws Exception {
+       FileUtil.fullyDelete(dfsDir);
+     }
+   }
++
++  private void testSaveAndLoadStripedINodeFile(FSNamesystem fsn, Configuration conf,
++      boolean isUC) throws IOException{
++    // contruct a INode with StripedBlock for saving and loading
++    fsn.createErasureCodingZone("/", null, 0, false);
++    long id = 123456789;
++    byte[] name = "testSaveAndLoadInodeFile_testfile".getBytes();
++    PermissionStatus permissionStatus = new PermissionStatus("testuser_a",
++        "testuser_groups", new FsPermission((short)0x755));
++    long mtime = 1426222916-3600;
++    long atime = 1426222916;
++    BlockInfoContiguous[] blks = new BlockInfoContiguous[0];
++    short replication = 3;
++    long preferredBlockSize = 128*1024*1024;
++    INodeFile file = new INodeFile(id, name, permissionStatus, mtime, atime,
++        blks, replication, preferredBlockSize);
++    ByteArrayOutputStream bs = new ByteArrayOutputStream();
++    file.addStripedBlocksFeature();
++
++    //construct StripedBlocks for the INode
++    BlockInfoStriped[] stripedBlks = new BlockInfoStriped[3];
++    long stripedBlkId = 10000001;
++    long timestamp = mtime+3600;
++    for (int i = 0; i < stripedBlks.length; i++) {
++      stripedBlks[i] = new BlockInfoStriped(
++          new Block(stripedBlkId + i, preferredBlockSize, timestamp),
++          testSchema, cellSize);
++      file.getStripedBlocksFeature().addBlock(stripedBlks[i]);
++    }
++
++    final String client = "testClient";
++    final String clientMachine = "testClientMachine";
++    final String path = "testUnderConstructionPath";
++
++    //save the INode to byte array
++    DataOutput out = new DataOutputStream(bs);
++    if (isUC) {
++      file.toUnderConstruction(client, clientMachine);
++      FSImageSerialization.writeINodeUnderConstruction((DataOutputStream) out,
++          file, path);
++    } else {
++      FSImageSerialization.writeINodeFile(file, out, false);
++    }
++    DataInput in = new DataInputStream(
++        new ByteArrayInputStream(bs.toByteArray()));
++
++    // load the INode from the byte array
++    INodeFile fileByLoaded;
++    if (isUC) {
++      fileByLoaded = FSImageSerialization.readINodeUnderConstruction(in,
++          fsn, fsn.getFSImage().getLayoutVersion());
++    } else {
++      fileByLoaded = (INodeFile) new FSImageFormat.Loader(conf, fsn)
++          .loadINodeWithLocalName(false, in, false);
++    }
++
++    assertEquals(id, fileByLoaded.getId() );
++    assertArrayEquals(isUC ? path.getBytes() : name,
++        fileByLoaded.getLocalName().getBytes());
++    assertEquals(permissionStatus.getUserName(),
++        fileByLoaded.getPermissionStatus().getUserName());
++    assertEquals(permissionStatus.getGroupName(),
++        fileByLoaded.getPermissionStatus().getGroupName());
++    assertEquals(permissionStatus.getPermission(),
++        fileByLoaded.getPermissionStatus().getPermission());
++    assertEquals(mtime, fileByLoaded.getModificationTime());
++    assertEquals(isUC ? mtime : atime, fileByLoaded.getAccessTime());
++    // TODO for striped blocks, we currently save and load them as contiguous
++    // blocks to/from legacy fsimage
++    assertEquals(3, fileByLoaded.getContiguousBlocks().length);
++    assertEquals(preferredBlockSize, fileByLoaded.getPreferredBlockSize());
++
++    if (isUC) {
++      assertEquals(client,
++          fileByLoaded.getFileUnderConstructionFeature().getClientName());
++      assertEquals(clientMachine,
++          fileByLoaded.getFileUnderConstructionFeature().getClientMachine());
++    }
++  }
++
++  /**
++   * Test if a INodeFile with BlockInfoStriped can be saved by
++   * FSImageSerialization and loaded by FSImageFormat#Loader.
++   */
++  @Test
++  public void testSaveAndLoadStripedINodeFile() throws IOException{
++    Configuration conf = new Configuration();
++    MiniDFSCluster cluster = null;
++    try {
++      cluster = new MiniDFSCluster.Builder(conf).build();
++      cluster.waitActive();
++      testSaveAndLoadStripedINodeFile(cluster.getNamesystem(), conf, false);
++    } finally {
++      if (cluster != null) {
++        cluster.shutdown();
++      }
++    }
++  }
++
++  /**
++   * Test if a INodeFileUnderConstruction with BlockInfoStriped can be
++   * saved and loaded by FSImageSerialization
++   */
++  @Test
++  public void testSaveAndLoadStripedINodeFileUC() throws IOException{
++    // construct a INode with StripedBlock for saving and loading
++    Configuration conf = new Configuration();
++    MiniDFSCluster cluster = null;
++    try {
++      cluster = new MiniDFSCluster.Builder(conf).build();
++      cluster.waitActive();
++      testSaveAndLoadStripedINodeFile(cluster.getNamesystem(), conf, true);
++    } finally {
++      if (cluster != null) {
++        cluster.shutdown();
++      }
++    }
++  }
++
++  /**
++   * Ensure that FSImage supports BlockGroup.
++   */
++  @Test
++  public void testSupportBlockGroup() throws IOException {
++    final short GROUP_SIZE = HdfsConstants.NUM_DATA_BLOCKS +
++        HdfsConstants.NUM_PARITY_BLOCKS;
++    final int BLOCK_SIZE = 8 * 1024 * 1024;
++    Configuration conf = new HdfsConfiguration();
++    conf.setLong(DFSConfigKeys.DFS_BLOCK_SIZE_KEY, BLOCK_SIZE);
++    MiniDFSCluster cluster = null;
++    try {
++      cluster = new MiniDFSCluster.Builder(conf).numDataNodes(GROUP_SIZE)
++          .build();
++      cluster.waitActive();
++      DistributedFileSystem fs = cluster.getFileSystem();
++      fs.getClient().getNamenode().createErasureCodingZone("/", null, 0);
++      Path file = new Path("/striped");
++      FSDataOutputStream out = fs.create(file);
++      byte[] bytes = DFSTestUtil.generateSequentialBytes(0, BLOCK_SIZE);
++      out.write(bytes);
++      out.close();
++
++      fs.setSafeMode(SafeModeAction.SAFEMODE_ENTER);
++      fs.saveNamespace();
++      fs.setSafeMode(SafeModeAction.SAFEMODE_LEAVE);
++
++      cluster.restartNameNodes();
++      fs = cluster.getFileSystem();
++      assertTrue(fs.exists(file));
++
++      // check the information of striped blocks
++      FSNamesystem fsn = cluster.getNamesystem();
++      INodeFile inode = fsn.dir.getINode(file.toString()).asFile();
++      FileWithStripedBlocksFeature sb = inode.getStripedBlocksFeature();
++      assertNotNull(sb);
++      BlockInfo[] blks = sb.getBlocks();
++      assertEquals(1, blks.length);
++      assertTrue(blks[0].isStriped());
++      assertEquals(HdfsConstants.NUM_DATA_BLOCKS,
++          blks[0].getStripedBlockStorageOp().getDataBlockNum());
++      assertEquals(HdfsConstants.NUM_PARITY_BLOCKS,
++          blks[0].getStripedBlockStorageOp().getParityBlockNum());
++    } finally {
++      cluster.shutdown();
++    }
++  }
++
++  @Test
++  public void testHasNonEcBlockUsingStripedIDForLoadFile() throws IOException{
++    // start a cluster
++    Configuration conf = new HdfsConfiguration();
++    MiniDFSCluster cluster = null;
++    try {
++      cluster = new MiniDFSCluster.Builder(conf).numDataNodes(9)
++          .build();
++      cluster.waitActive();
++      DistributedFileSystem fs = cluster.getFileSystem();
++      FSNamesystem fns = cluster.getNamesystem();
++
++      String testDir = "/test_block_manager";
++      String testFile = "testfile_loadfile";
++      String testFilePath = testDir + "/" + testFile;
++      String clientName = "testUser_loadfile";
++      String clientMachine = "testMachine_loadfile";
++      long blkId = -1;
++      long blkNumBytes = 1024;
++      long timestamp = 1426222918;
++
++      fs.mkdir(new Path(testDir), new FsPermission("755"));
++      Path p = new Path(testFilePath);
++
++      DFSTestUtil.createFile(fs, p, 0, (short) 1, 1);
++      BlockInfoContiguous cBlk = new BlockInfoContiguous(
++          new Block(blkId, blkNumBytes, timestamp), (short)3);
++      INodeFile file = (INodeFile)fns.getFSDirectory().getINode(testFilePath);
++      file.toUnderConstruction(clientName, clientMachine);
++      file.addBlock(cBlk);
++      file.toCompleteFile(System.currentTimeMillis());
++      fns.enterSafeMode(false);
++      fns.saveNamespace(0, 0);
++      cluster.restartNameNodes();
++      cluster.waitActive();
++      fns = cluster.getNamesystem();
++      assertTrue(fns.getBlockManager().hasNonEcBlockUsingStripedID());
++
++      //after nonEcBlockUsingStripedID is deleted
++      //the hasNonEcBlockUsingStripedID is set to false
++      fs = cluster.getFileSystem();
++      fs.delete(p,false);
++      fns.enterSafeMode(false);
++      fns.saveNamespace(0, 0);
++      cluster.restartNameNodes();
++      cluster.waitActive();
++      fns = cluster.getNamesystem();
++      assertFalse(fns.getBlockManager().hasNonEcBlockUsingStripedID());
++
++      cluster.shutdown();
++      cluster = null;
++    } finally {
++      if (cluster != null) {
++        cluster.shutdown();
++      }
++    }
++  }
++
++  @Test
++  public void testHasNonEcBlockUsingStripedIDForLoadUCFile()
++      throws IOException{
++    // start a cluster
++    Configuration conf = new HdfsConfiguration();
++    MiniDFSCluster cluster = null;
++    try {
++      cluster = new MiniDFSCluster.Builder(conf).numDataNodes(9)
++          .build();
++      cluster.waitActive();
++      DistributedFileSystem fs = cluster.getFileSystem();
++      FSNamesystem fns = cluster.getNamesystem();
++
++      String testDir = "/test_block_manager";
++      String testFile = "testfile_loaducfile";
++      String testFilePath = testDir + "/" + testFile;
++      String clientName = "testUser_loaducfile";
++      String clientMachine = "testMachine_loaducfile";
++      long blkId = -1;
++      long blkNumBytes = 1024;
++      long timestamp = 1426222918;
++
++      fs.mkdir(new Path(testDir), new FsPermission("755"));
++      Path p = new Path(testFilePath);
++
++      DFSTestUtil.createFile(fs, p, 0, (short) 1, 1);
++      BlockInfoContiguous cBlk = new BlockInfoContiguous(
++          new Block(blkId, blkNumBytes, timestamp), (short)3);
++      INodeFile file = (INodeFile)fns.getFSDirectory().getINode(testFilePath);
++      file.toUnderConstruction(clientName, clientMachine);
++      file.addBlock(cBlk);
++      fns.enterSafeMode(false);
++      fns.saveNamespace(0, 0);
++      cluster.restartNameNodes();
++      cluster.waitActive();
++      fns = cluster.getNamesystem();
++      assertTrue(fns.getBlockManager().hasNonEcBlockUsingStripedID());
++
++      cluster.shutdown();
++      cluster = null;
++    } finally {
++      if (cluster != null) {
++        cluster.shutdown();
++      }
++    }
++  }
++
++  @Test
++  public void testHasNonEcBlockUsingStripedIDForLoadSnapshot()
++      throws IOException{
++    // start a cluster
++    Configuration conf = new HdfsConfiguration();
++    MiniDFSCluster cluster = null;
++    try {
++      cluster = new MiniDFSCluster.Builder(conf).numDataNodes(9)
++          .build();
++      cluster.waitActive();
++      DistributedFileSystem fs = cluster.getFileSystem();
++      FSNamesystem fns = cluster.getNamesystem();
++
++      String testDir = "/test_block_manager";
++      String testFile = "testfile_loadSnapshot";
++      String testFilePath = testDir + "/" + testFile;
++      String clientName = "testUser_loadSnapshot";
++      String clientMachine = "testMachine_loadSnapshot";
++      long blkId = -1;
++      long blkNumBytes = 1024;
++      long timestamp = 1426222918;
++
++      Path d = new Path(testDir);
++      fs.mkdir(d, new FsPermission("755"));
++      fs.allowSnapshot(d);
++
++      Path p = new Path(testFilePath);
++      DFSTestUtil.createFile(fs, p, 0, (short) 1, 1);
++      BlockInfoContiguous cBlk = new BlockInfoContiguous(
++          new Block(blkId, blkNumBytes, timestamp), (short)3);
++      INodeFile file = (INodeFile)fns.getFSDirectory().getINode(testFilePath);
++      file.toUnderConstruction(clientName, clientMachine);
++      file.addBlock(cBlk);
++      file.toCompleteFile(System.currentTimeMillis());
++
++      fs.createSnapshot(d,"testHasNonEcBlockUsingStripeID");
++      fs.truncate(p,0);
++      fns.enterSafeMode(false);
++      fns.saveNamespace(0, 0);
++      cluster.restartNameNodes();
++      cluster.waitActive();
++      fns = cluster.getNamesystem();
++      assertTrue(fns.getBlockManager().hasNonEcBlockUsingStripedID());
++
++      cluster.shutdown();
++      cluster = null;
++    } finally {
++      if (cluster != null) {
++        cluster.shutdown();
++      }
++    }
++  }
+ }

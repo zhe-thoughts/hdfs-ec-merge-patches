@@ -101,10 +101,20 @@ index feebd87..746802c 100644
 +  }
 +}
 diff --git a/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/blockmanagement/BlockInfo.java b/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/blockmanagement/BlockInfo.java
-index 5ad992b..d6c756d 100644
+index 5ad992b..0d2ed38 100644
 --- a/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/blockmanagement/BlockInfo.java
 +++ b/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/blockmanagement/BlockInfo.java
-@@ -315,6 +315,10 @@ public boolean isComplete() {
+@@ -219,9 +219,6 @@ int findStorageInfo(DatanodeStorageInfo storageInfo) {
+       if (cur == storageInfo) {
+         return idx;
+       }
+-      if (cur == null) {
+-        break;
+-      }
+     }
+     return -1;
+   }
+@@ -315,6 +312,10 @@ public boolean isComplete() {
      return getBlockUCState().equals(BlockUCState.COMPLETE);
    }
  
@@ -136,10 +146,10 @@ index de64ad8..2ffad2a 100644
        HdfsServerConstants.BlockUCState s, DatanodeStorageInfo[] targets) {
 diff --git a/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/blockmanagement/BlockInfoStriped.java b/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/blockmanagement/BlockInfoStriped.java
 new file mode 100644
-index 0000000..f522609
+index 0000000..e654aea
 --- /dev/null
 +++ b/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/blockmanagement/BlockInfoStriped.java
-@@ -0,0 +1,65 @@
+@@ -0,0 +1,66 @@
 +package org.apache.hadoop.hdfs.server.blockmanagement;
 +
 +import com.google.common.base.Preconditions;
@@ -163,7 +173,8 @@ index 0000000..f522609
 +  BlockInfoStriped(BlockInfo b) {
 +    super(b);
 +    Preconditions.checkState(b.isStriped());
-+    this.storageOp = new StripedBlockStorageOp(b.getStripedBlockStorageOp());
++    this.storageOp = new StripedBlockStorageOp(this,
++        b.getStripedBlockStorageOp());
 +    this.setBlockCollection(b.getBlockCollection());
 +  }
 +
@@ -480,7 +491,7 @@ index eef8857..6074784 100644
  
 diff --git a/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/blockmanagement/StripedBlockStorageOp.java b/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/blockmanagement/StripedBlockStorageOp.java
 new file mode 100644
-index 0000000..0784df6
+index 0000000..b4639ed
 --- /dev/null
 +++ b/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/blockmanagement/StripedBlockStorageOp.java
 @@ -0,0 +1,238 @@
@@ -531,8 +542,8 @@ index 0000000..0784df6
 +    this.cellSize = cellSize;
 +  }
 +
-+  public StripedBlockStorageOp(StripedBlockStorageOp op) {
-+    this(op.b, op.schema, op.cellSize);
++  public StripedBlockStorageOp(BlockInfo b, StripedBlockStorageOp op) {
++    this(b, op.schema, op.cellSize);
 +  }
 +
 +  public ECSchema getSchema() {
@@ -686,7 +697,7 @@ index 0000000..0784df6
 +  }
 +
 +  void replaceBlock(BlockInfo newBlock) {
-+    Preconditions.checkArgument(newBlock instanceof BlockInfoStriped);
++    Preconditions.checkArgument(newBlock.isStriped());
 +    StripedBlockStorageOp newStorageOp = newBlock.getStripedBlockStorageOp();
 +    final int size = b.getCapacity();
 +    newStorageOp.ensureCapacity(size, false);
@@ -975,10 +986,10 @@ index 3bd1d91..344c257 100644
  /**
 diff --git a/hadoop-hdfs-project/hadoop-hdfs/src/test/java/org/apache/hadoop/hdfs/server/blockmanagement/TestBlockInfoStriped.java b/hadoop-hdfs-project/hadoop-hdfs/src/test/java/org/apache/hadoop/hdfs/server/blockmanagement/TestBlockInfoStriped.java
 new file mode 100644
-index 0000000..319615f
+index 0000000..09260fb
 --- /dev/null
 +++ b/hadoop-hdfs-project/hadoop-hdfs/src/test/java/org/apache/hadoop/hdfs/server/blockmanagement/TestBlockInfoStriped.java
-@@ -0,0 +1,225 @@
+@@ -0,0 +1,228 @@
 +/**
 + * Licensed to the Apache Software Foundation (ASF) under one
 + * or more contributor license agreements.  See the NOTICE file
@@ -1146,7 +1157,9 @@ index 0000000..319615f
 +    // now we should have 8 storages
 +    Assert.assertEquals(TOTAL_NUM_BLOCKS * 2 - 2, info.numNodes());
 +    Assert.assertEquals(TOTAL_NUM_BLOCKS * 2 - 2, info.getCapacity());
-+    indices = (byte[]) Whitebox.getInternalState(info, "indices");
++    Assert.assertTrue(info.isStriped());
++    indices = (byte[]) Whitebox.getInternalState(
++        info.getStripedBlockStorageOp(), "indices");
 +    Assert.assertEquals(TOTAL_NUM_BLOCKS * 2 - 2, indices.length);
 +    int j = TOTAL_NUM_BLOCKS;
 +    for (int i = TOTAL_NUM_BLOCKS; i < storages2.length; i++) {
@@ -1165,7 +1178,8 @@ index 0000000..319615f
 +    // now we should have 3 storages
 +    Assert.assertEquals(TOTAL_NUM_BLOCKS - 2, info.numNodes());
 +    Assert.assertEquals(TOTAL_NUM_BLOCKS * 2 - 2, info.getCapacity());
-+    indices = (byte[]) Whitebox.getInternalState(info, "indices");
++    indices = (byte[]) Whitebox.getInternalState(
++        info.getStripedBlockStorageOp(), "indices");
 +    Assert.assertEquals(TOTAL_NUM_BLOCKS * 2 - 2, indices.length);
 +    for (int i = 0; i < TOTAL_NUM_BLOCKS; i++) {
 +      if (i == 0 || i == 2) {
