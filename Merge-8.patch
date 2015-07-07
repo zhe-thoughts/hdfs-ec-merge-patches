@@ -1,5 +1,5 @@
 diff --git a/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/protocolPB/PBHelper.java b/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/protocolPB/PBHelper.java
-index 4459577..830f2c1 100644
+index ce06c30..5a608f8 100644
 --- a/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/protocolPB/PBHelper.java
 +++ b/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/protocolPB/PBHelper.java
 @@ -121,6 +121,7 @@
@@ -10,15 +10,15 @@ index 4459577..830f2c1 100644
  import org.apache.hadoop.hdfs.protocol.proto.DatanodeProtocolProtos.BlockIdCommandProto;
  import org.apache.hadoop.hdfs.protocol.proto.DatanodeProtocolProtos.BlockRecoveryCommandProto;
  import org.apache.hadoop.hdfs.protocol.proto.DatanodeProtocolProtos.DatanodeCommandProto;
-@@ -132,6 +133,7 @@
- import org.apache.hadoop.hdfs.protocol.proto.DatanodeProtocolProtos.RegisterCommandProto;
- import org.apache.hadoop.hdfs.protocol.proto.DatanodeProtocolProtos.VolumeFailureSummaryProto;
+@@ -134,6 +135,7 @@
  import org.apache.hadoop.hdfs.protocol.proto.DatanodeProtocolProtos.BlockReportContextProto;
+ import org.apache.hadoop.hdfs.protocol.proto.ErasureCodingProtos;
+ import org.apache.hadoop.hdfs.protocol.proto.HdfsProtos;
 +import org.apache.hadoop.hdfs.protocol.proto.ErasureCodingProtos.BlockECRecoveryInfoProto;
  import org.apache.hadoop.hdfs.protocol.proto.ErasureCodingProtos.ErasureCodingZoneProto;
  import org.apache.hadoop.hdfs.protocol.proto.HdfsProtos.ECSchemaOptionEntryProto;
  import org.apache.hadoop.hdfs.protocol.proto.HdfsProtos.ECSchemaProto;
-@@ -200,6 +202,8 @@
+@@ -202,6 +204,8 @@
  import org.apache.hadoop.hdfs.server.namenode.CheckpointSignature;
  import org.apache.hadoop.hdfs.server.protocol.BalancerBandwidthCommand;
  import org.apache.hadoop.hdfs.server.protocol.BlockCommand;
@@ -27,7 +27,7 @@ index 4459577..830f2c1 100644
  import org.apache.hadoop.hdfs.server.protocol.BlockIdCommand;
  import org.apache.hadoop.hdfs.server.protocol.BlockRecoveryCommand;
  import org.apache.hadoop.hdfs.server.protocol.BlockRecoveryCommand.RecoveringBlock;
-@@ -951,6 +955,8 @@ public static DatanodeCommand convert(DatanodeCommandProto proto) {
+@@ -953,6 +957,8 @@ public static DatanodeCommand convert(DatanodeCommandProto proto) {
        return REG_CMD;
      case BlockIdCommand:
        return PBHelper.convert(proto.getBlkIdCmd());
@@ -36,7 +36,7 @@ index 4459577..830f2c1 100644
      default:
        return null;
      }
-@@ -1101,6 +1107,11 @@ public static DatanodeCommandProto convert(DatanodeCommand datanodeCommand) {
+@@ -1103,6 +1109,11 @@ public static DatanodeCommandProto convert(DatanodeCommand datanodeCommand) {
        builder.setCmdType(DatanodeCommandProto.Type.BlockIdCommand).
          setBlkIdCmd(PBHelper.convert((BlockIdCommand) datanodeCommand));
        break;
@@ -48,7 +48,7 @@ index 4459577..830f2c1 100644
      case DatanodeProtocol.DNA_UNKNOWN: //Not expected
      default:
        builder.setCmdType(DatanodeCommandProto.Type.NullDatanodeCommand);
-@@ -3138,4 +3149,139 @@ public static ErasureCodingZone convertErasureCodingZone(
+@@ -3140,4 +3151,139 @@ public static ErasureCodingZone convertErasureCodingZone(
      return new ErasureCodingZone(ecZoneProto.getDir(),
          convertECSchema(ecZoneProto.getSchema()), ecZoneProto.getCellSize());
    }

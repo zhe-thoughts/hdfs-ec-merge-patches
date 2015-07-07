@@ -171,6 +171,19 @@ index 0000000..dc5a77f
 +    return true;
 +  }
 +}
+diff --git a/hadoop-hdfs-project/hadoop-hdfs-client/src/main/java/org/apache/hadoop/hdfs/web/JsonUtilClient.java b/hadoop-hdfs-project/hadoop-hdfs-client/src/main/java/org/apache/hadoop/hdfs/web/JsonUtilClient.java
+index 5ce6c85..eeadd73 100644
+--- a/hadoop-hdfs-project/hadoop-hdfs-client/src/main/java/org/apache/hadoop/hdfs/web/JsonUtilClient.java
++++ b/hadoop-hdfs-project/hadoop-hdfs-client/src/main/java/org/apache/hadoop/hdfs/web/JsonUtilClient.java
+@@ -503,7 +503,7 @@ static LocatedBlocks toLocatedBlocks(
+         (Map<?, ?>) m.get("lastLocatedBlock"));
+     final boolean isLastBlockComplete = (Boolean)m.get("isLastBlockComplete");
+     return new LocatedBlocks(fileLength, isUnderConstruction, locatedBlocks,
+-        lastLocatedBlock, isLastBlockComplete, null);
++        lastLocatedBlock, isLastBlockComplete, null, null, 0);
+   }
+ 
+ }
 diff --git a/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/protocolPB/ClientNamenodeProtocolServerSideTranslatorPB.java b/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/protocolPB/ClientNamenodeProtocolServerSideTranslatorPB.java
 index 3d36cb1..6f70b50 100644
 --- a/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/protocolPB/ClientNamenodeProtocolServerSideTranslatorPB.java
@@ -277,7 +290,7 @@ index 850b58b..754891e 100644
      } catch (ServiceException e) {
        throw ProtobufHelper.getRemoteException(e);
 diff --git a/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/protocolPB/PBHelper.java b/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/protocolPB/PBHelper.java
-index 28bac77..4459577 100644
+index 6287116..ce06c30 100644
 --- a/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/protocolPB/PBHelper.java
 +++ b/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/protocolPB/PBHelper.java
 @@ -87,6 +87,7 @@
@@ -288,7 +301,7 @@ index 28bac77..4459577 100644
  import org.apache.hadoop.hdfs.protocol.RollingUpgradeInfo;
  import org.apache.hadoop.hdfs.protocol.RollingUpgradeStatus;
  import org.apache.hadoop.hdfs.protocol.SnapshotDiffReport;
-@@ -618,7 +619,7 @@ public static RecoveringBlockProto convert(RecoveringBlock b) {
+@@ -620,7 +621,7 @@ public static RecoveringBlockProto convert(RecoveringBlock b) {
      if (b == null) {
        return null;
      }
@@ -297,7 +310,7 @@ index 28bac77..4459577 100644
      RecoveringBlockProto.Builder builder = RecoveringBlockProto.newBuilder();
      builder.setBlock(lb).setNewGenStamp(b.getNewGenerationStamp());
      if(b.getNewBlock() != null)
-@@ -768,7 +769,7 @@ public static AdminStates convert(AdminState adminState) {
+@@ -770,7 +771,7 @@ public static AdminStates convert(AdminState adminState) {
      }
    }
    
@@ -306,7 +319,7 @@ index 28bac77..4459577 100644
      if (b == null) return null;
      Builder builder = LocatedBlockProto.newBuilder();
      DatanodeInfo[] locs = b.getLocations();
-@@ -789,21 +790,27 @@ public static LocatedBlockProto convert(LocatedBlock b) {
+@@ -791,21 +792,27 @@ public static LocatedBlockProto convert(LocatedBlock b) {
  
      StorageType[] storageTypes = b.getStorageTypes();
      if (storageTypes != null) {
@@ -337,7 +350,7 @@ index 28bac77..4459577 100644
      if (proto == null) return null;
      List<DatanodeInfoProto> locs = proto.getLocsList();
      DatanodeInfo[] targets = new DatanodeInfo[locs.size()];
-@@ -823,6 +830,15 @@ public static LocatedBlock convert(LocatedBlockProto proto) {
+@@ -825,6 +832,15 @@ public static LocatedBlock convert(LocatedBlockProto proto) {
        storageIDs = proto.getStorageIDsList().toArray(new String[storageIDsCount]);
      }
  
@@ -353,7 +366,7 @@ index 28bac77..4459577 100644
      // Set values from the isCached list, re-using references from loc
      List<DatanodeInfo> cachedLocs = new ArrayList<DatanodeInfo>(locs.size());
      List<Boolean> isCachedList = proto.getIsCachedList();
-@@ -832,9 +848,17 @@ public static LocatedBlock convert(LocatedBlockProto proto) {
+@@ -834,9 +850,17 @@ public static LocatedBlock convert(LocatedBlockProto proto) {
        }
      }
  
@@ -374,7 +387,7 @@ index 28bac77..4459577 100644
      lb.setBlockToken(PBHelper.convert(proto.getBlockToken()));
  
      return lb;
-@@ -1250,36 +1274,36 @@ public static NamespaceInfoProto convert(NamespaceInfo info) {
+@@ -1252,36 +1276,36 @@ public static NamespaceInfoProto convert(NamespaceInfo info) {
    }
    
    // Located Block Arrays and Lists
@@ -426,7 +439,7 @@ index 28bac77..4459577 100644
      }
      return result;
    }
-@@ -1289,8 +1313,9 @@ public static NamespaceInfoProto convert(NamespaceInfo info) {
+@@ -1291,10 +1315,13 @@ public static NamespaceInfoProto convert(NamespaceInfo info) {
    public static LocatedBlocks convert(LocatedBlocksProto lb) {
      return new LocatedBlocks(
          lb.getFileLength(), lb.getUnderConstruction(),
@@ -436,9 +449,14 @@ index 28bac77..4459577 100644
 +        lb.hasLastBlock() ?
 +            PBHelper.convertLocatedBlockProto(lb.getLastBlock()) : null,
          lb.getIsLastBlockComplete(),
-         lb.hasFileEncryptionInfo() ? convert(lb.getFileEncryptionInfo()) : null,
-         lb.hasECSchema() ? convertECSchema(lb.getECSchema()) : null,
-@@ -1304,7 +1329,8 @@ public static LocatedBlocksProto convert(LocatedBlocks lb) {
+-        lb.hasFileEncryptionInfo() ? convert(lb.getFileEncryptionInfo()) : null);
++        lb.hasFileEncryptionInfo() ? convert(lb.getFileEncryptionInfo()) : null,
++        lb.hasECSchema() ? convertECSchema(lb.getECSchema()) : null,
++        lb.hasStripeCellSize() ? lb.getStripeCellSize() : 0);
+   }
+   
+   public static LocatedBlocksProto convert(LocatedBlocks lb) {
+@@ -1304,14 +1331,21 @@ public static LocatedBlocksProto convert(LocatedBlocks lb) {
      LocatedBlocksProto.Builder builder = 
          LocatedBlocksProto.newBuilder();
      if (lb.getLastLocatedBlock() != null) {
@@ -448,8 +466,13 @@ index 28bac77..4459577 100644
      }
      if (lb.getFileEncryptionInfo() != null) {
        builder.setFileEncryptionInfo(convert(lb.getFileEncryptionInfo()));
-@@ -1317,7 +1343,7 @@ public static LocatedBlocksProto convert(LocatedBlocks lb) {
      }
++    if (lb.getECSchema() != null) {
++      builder.setECSchema(convertECSchema(lb.getECSchema()));
++    }
++    if (lb.getStripeCellSize() != 0) {
++      builder.setStripeCellSize(lb.getStripeCellSize());
++    }
      return builder.setFileLength(lb.getFileLength())
          .setUnderConstruction(lb.isUnderConstruction())
 -        .addAllBlocks(PBHelper.convertLocatedBlock2(lb.getLocatedBlocks()))
@@ -670,3 +693,18 @@ index cd308c8..2762ca2 100644
  
        // lastBlock is not part of getLocatedBlocks(), might need to sort it too
        LocatedBlock lastBlock = blocks.getLastLocatedBlock();
+diff --git a/hadoop-hdfs-project/hadoop-hdfs/src/main/proto/hdfs.proto b/hadoop-hdfs-project/hadoop-hdfs/src/main/proto/hdfs.proto
+index 0b387f0..6dc8d43 100644
+--- a/hadoop-hdfs-project/hadoop-hdfs/src/main/proto/hdfs.proto
++++ b/hadoop-hdfs-project/hadoop-hdfs/src/main/proto/hdfs.proto
+@@ -300,6 +300,10 @@ message LocatedBlocksProto {
+   optional LocatedBlockProto lastBlock = 4;
+   required bool isLastBlockComplete = 5;
+   optional FileEncryptionInfoProto fileEncryptionInfo = 6;
++
++  // Optional field for erasure coding
++  optional ECSchemaProto eCSchema = 7;
++  optional uint32 stripeCellSize = 8;
+ }
+ 
+ /**

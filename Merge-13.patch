@@ -1,8 +1,8 @@
 diff --git a/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/protocolPB/PBHelper.java b/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/protocolPB/PBHelper.java
-index 830f2c1..45e74b2 100644
+index 5a608f8..a0acd85 100644
 --- a/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/protocolPB/PBHelper.java
 +++ b/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/protocolPB/PBHelper.java
-@@ -210,6 +210,7 @@
+@@ -212,6 +212,7 @@
  import org.apache.hadoop.hdfs.server.protocol.BlockReportContext;
  import org.apache.hadoop.hdfs.server.protocol.BlocksWithLocations;
  import org.apache.hadoop.hdfs.server.protocol.BlocksWithLocations.BlockWithLocations;
@@ -10,7 +10,7 @@ index 830f2c1..45e74b2 100644
  import org.apache.hadoop.hdfs.server.protocol.CheckpointCommand;
  import org.apache.hadoop.hdfs.server.protocol.DatanodeCommand;
  import org.apache.hadoop.hdfs.server.protocol.DatanodeProtocol;
-@@ -443,22 +444,32 @@ public static Block convert(BlockProto b) {
+@@ -445,22 +446,32 @@ public static Block convert(BlockProto b) {
    }
  
    public static BlockWithLocationsProto convert(BlockWithLocations blk) {
@@ -638,3 +638,17 @@ index a985dbd..0507faf 100644
    private final BlockWithLocations[] blocks;
  
    /** Constructor with one parameter */
+diff --git a/hadoop-hdfs-project/hadoop-hdfs/src/main/proto/hdfs.proto b/hadoop-hdfs-project/hadoop-hdfs/src/main/proto/hdfs.proto
+index 6dc8d43..5170c9a 100644
+--- a/hadoop-hdfs-project/hadoop-hdfs/src/main/proto/hdfs.proto
++++ b/hadoop-hdfs-project/hadoop-hdfs/src/main/proto/hdfs.proto
+@@ -525,6 +525,9 @@ message BlockWithLocationsProto {
+   repeated string datanodeUuids = 2; // Datanodes with replicas of the block
+   repeated string storageUuids = 3;  // Storages with replicas of the block
+   repeated StorageTypeProto storageTypes = 4;
++
++  optional bytes indices = 5;
++  optional uint32 dataBlockNum = 6;
+ }
+ 
+ /**

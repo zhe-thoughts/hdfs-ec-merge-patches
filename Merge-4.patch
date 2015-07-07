@@ -1,105 +1,3 @@
-diff --git a/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/blockmanagement/BlockIdManager.java b/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/blockmanagement/BlockIdManager.java
-index feebd87..746802c 100644
---- a/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/blockmanagement/BlockIdManager.java
-+++ b/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/blockmanagement/BlockIdManager.java
-@@ -54,10 +54,12 @@
-    * The global block ID space for this file system.
-    */
-   private final SequentialBlockIdGenerator blockIdGenerator;
-+  private final SequentialBlockGroupIdGenerator blockGroupIdGenerator;
- 
-   public BlockIdManager(BlockManager blockManager) {
-     this.generationStampV1Limit = HdfsConstants.GRANDFATHER_GENERATION_STAMP;
-     this.blockIdGenerator = new SequentialBlockIdGenerator(blockManager);
-+    this.blockGroupIdGenerator = new SequentialBlockGroupIdGenerator(blockManager);
-   }
- 
-   /**
-@@ -102,21 +104,38 @@ SequentialBlockIdGenerator getBlockIdGenerator() {
-   }
- 
-   /**
--   * Sets the maximum allocated block ID for this filesystem. This is
-+   * Sets the maximum allocated contiguous block ID for this filesystem. This is
-    * the basis for allocating new block IDs.
-    */
--  public void setLastAllocatedBlockId(long blockId) {
-+  public void setLastAllocatedContiguousBlockId(long blockId) {
-     blockIdGenerator.skipTo(blockId);
-   }
- 
-   /**
--   * Gets the maximum sequentially allocated block ID for this filesystem
-+   * Gets the maximum sequentially allocated contiguous block ID for this
-+   * filesystem
-    */
--  public long getLastAllocatedBlockId() {
-+  public long getLastAllocatedContiguousBlockId() {
-     return blockIdGenerator.getCurrentValue();
-   }
- 
-   /**
-+   * Sets the maximum allocated striped block ID for this filesystem. This is
-+   * the basis for allocating new block IDs.
-+   */
-+  public void setLastAllocatedStripedBlockId(long blockId) {
-+    blockGroupIdGenerator.skipTo(blockId);
-+  }
-+
-+  /**
-+   * Gets the maximum sequentially allocated striped block ID for this
-+   * filesystem
-+   */
-+  public long getLastAllocatedStripedBlockId() {
-+    return blockGroupIdGenerator.getCurrentValue();
-+  }
-+
-+  /**
-    * Sets the current generation stamp for legacy blocks
-    */
-   public void setGenerationStampV1(long stamp) {
-@@ -187,10 +206,14 @@ public boolean isLegacyBlock(Block block) {
-   /**
-    * Increments, logs and then returns the block ID
-    */
--  public long nextBlockId() {
-+  public long nextContiguousBlockId() {
-     return blockIdGenerator.nextValue();
-   }
- 
-+  public long nextStripedBlockId() {
-+    return blockGroupIdGenerator.nextValue();
-+  }
-+
-   public boolean isGenStampInFuture(Block block) {
-     if (isLegacyBlock(block)) {
-       return block.getGenerationStamp() > getGenerationStampV1();
-@@ -206,4 +229,23 @@ public void clear() {
-       .LAST_RESERVED_BLOCK_ID);
-     generationStampV1Limit = HdfsConstants.GRANDFATHER_GENERATION_STAMP;
-   }
--}
-\ No newline at end of file
-+
-+  public static boolean isStripedBlockID(long id) {
-+    return id < 0;
-+  }
-+
-+  /**
-+   * The last 4 bits of HdfsConstants.BLOCK_GROUP_INDEX_MASK(15) is 1111,
-+   * so the last 4 bits of (~HdfsConstants.BLOCK_GROUP_INDEX_MASK) is 0000
-+   * and the other 60 bits are 1. Group ID is the first 60 bits of any
-+   * data/parity block id in the same striped block group.
-+   */
-+  public static long convertToStripedID(long id) {
-+    return id & (~HdfsServerConstants.BLOCK_GROUP_INDEX_MASK);
-+  }
-+
-+  public static int getBlockIndex(Block reportedBlock) {
-+    return (int) (reportedBlock.getBlockId() &
-+        HdfsServerConstants.BLOCK_GROUP_INDEX_MASK);
-+  }
-+}
 diff --git a/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/blockmanagement/BlockManager.java b/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/blockmanagement/BlockManager.java
 index 0b60a97..170a357 100644
 --- a/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/blockmanagement/BlockManager.java
@@ -540,215 +438,8 @@ index 0dbf485..00cea53 100644
      }
    }
    
-diff --git a/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/blockmanagement/SequentialBlockGroupIdGenerator.java b/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/blockmanagement/SequentialBlockGroupIdGenerator.java
-new file mode 100644
-index 0000000..479ee4c
---- /dev/null
-+++ b/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/blockmanagement/SequentialBlockGroupIdGenerator.java
-@@ -0,0 +1,85 @@
-+/**
-+ * Licensed to the Apache Software Foundation (ASF) under one
-+ * or more contributor license agreements.  See the NOTICE file
-+ * distributed with this work for additional information
-+ * regarding copyright ownership.  The ASF licenses this file
-+ * to you under the Apache License, Version 2.0 (the
-+ * "License"); you may not use this file except in compliance
-+ * with the License.  You may obtain a copy of the License at
-+ *
-+ *     http://www.apache.org/licenses/LICENSE-2.0
-+ *
-+ * Unless required by applicable law or agreed to in writing, software
-+ * distributed under the License is distributed on an "AS IS" BASIS,
-+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-+ * See the License for the specific language governing permissions and
-+ * limitations under the License.
-+ */
-+package org.apache.hadoop.hdfs.server.blockmanagement;
-+
-+import org.apache.hadoop.classification.InterfaceAudience;
-+import org.apache.hadoop.hdfs.protocol.Block;
-+import org.apache.hadoop.util.SequentialNumber;
-+
-+import static org.apache.hadoop.hdfs.server.common.HdfsServerConstants.BLOCK_GROUP_INDEX_MASK;
-+import static org.apache.hadoop.hdfs.server.common.HdfsServerConstants.MAX_BLOCKS_IN_GROUP;
-+
-+/**
-+ * Generate the next valid block group ID by incrementing the maximum block
-+ * group ID allocated so far, with the first 2^10 block group IDs reserved.
-+ * HDFS-EC introduces a hierarchical protocol to name blocks and groups:
-+ * Contiguous: {reserved block IDs | flag | block ID}
-+ * Striped: {reserved block IDs | flag | block group ID | index in group}
-+ *
-+ * Following n bits of reserved block IDs, The (n+1)th bit in an ID
-+ * distinguishes contiguous (0) and striped (1) blocks. For a striped block,
-+ * bits (n+2) to (64-m) represent the ID of its block group, while the last m
-+ * bits represent its index of the group. The value m is determined by the
-+ * maximum number of blocks in a group (MAX_BLOCKS_IN_GROUP).
-+ *
-+ * Note that the {@link #nextValue()} methods requires external lock to
-+ * guarantee IDs have no conflicts.
-+ */
-+@InterfaceAudience.Private
-+public class SequentialBlockGroupIdGenerator extends SequentialNumber {
-+
-+  private final BlockManager blockManager;
-+
-+  SequentialBlockGroupIdGenerator(BlockManager blockManagerRef) {
-+    super(Long.MIN_VALUE);
-+    this.blockManager = blockManagerRef;
-+  }
-+
-+  @Override // NumberGenerator
-+  public long nextValue() {
-+    skipTo((getCurrentValue() & ~BLOCK_GROUP_INDEX_MASK) + MAX_BLOCKS_IN_GROUP);
-+    // Make sure there's no conflict with existing random block IDs
-+    final Block b = new Block(getCurrentValue());
-+    while (hasValidBlockInRange(b)) {
-+      skipTo(getCurrentValue() + MAX_BLOCKS_IN_GROUP);
-+      b.setBlockId(getCurrentValue());
-+    }
-+    if (b.getBlockId() >= 0) {
-+      throw new IllegalStateException("All negative block group IDs are used, "
-+          + "growing into positive IDs, "
-+          + "which might conflict with non-erasure coded blocks.");
-+    }
-+    return getCurrentValue();
-+  }
-+
-+  /**
-+   * @param b A block object whose id is set to the starting point for check
-+   * @return true if any ID in the range
-+   *      {id, id+HdfsConstants.MAX_BLOCKS_IN_GROUP} is pointed-to by a file
-+   */
-+  private boolean hasValidBlockInRange(Block b) {
-+    final long id = b.getBlockId();
-+    for (int i = 0; i < MAX_BLOCKS_IN_GROUP; i++) {
-+      b.setBlockId(id + i);
-+      if (blockManager.getBlockCollection(b) != null) {
-+        return true;
-+      }
-+    }
-+    return false;
-+  }
-+}
-diff --git a/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/blockmanagement/SequentialBlockIdGenerator.java b/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/blockmanagement/SequentialBlockIdGenerator.java
-index eef8857..6074784 100644
---- a/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/blockmanagement/SequentialBlockIdGenerator.java
-+++ b/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/blockmanagement/SequentialBlockIdGenerator.java
-@@ -19,7 +19,6 @@
- 
- import org.apache.hadoop.classification.InterfaceAudience;
- import org.apache.hadoop.hdfs.protocol.Block;
--import org.apache.hadoop.hdfs.server.blockmanagement.BlockManager;
- import org.apache.hadoop.util.SequentialNumber;
- 
- /**
-@@ -54,6 +53,11 @@ public long nextValue() {
-     while(isValidBlock(b)) {
-       b.setBlockId(super.nextValue());
-     }
-+    if (b.getBlockId() < 0) {
-+      throw new IllegalStateException("All positive block IDs are used, " +
-+          "wrapping to negative IDs, " +
-+          "which might conflict with erasure coded block groups.");
-+    }
-     return b.getBlockId();
-   }
- 
-diff --git a/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/common/HdfsServerConstants.java b/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/common/HdfsServerConstants.java
-index 250fca5..4043928 100644
---- a/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/common/HdfsServerConstants.java
-+++ b/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/common/HdfsServerConstants.java
-@@ -398,4 +398,7 @@ public void write(DataOutput out) throws IOException {
-       "security.hdfs.unreadable.by.superuser";
-   String XATTR_ERASURECODING_ZONE =
-       "raw.hdfs.erasurecoding.zone";
-+
-+  long BLOCK_GROUP_INDEX_MASK = 15;
-+  byte MAX_BLOCKS_IN_GROUP = 16;
- }
-diff --git a/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/namenode/FSEditLogLoader.java b/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/namenode/FSEditLogLoader.java
-index 63ef985..f7f6e9c 100644
---- a/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/namenode/FSEditLogLoader.java
-+++ b/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/namenode/FSEditLogLoader.java
-@@ -43,6 +43,7 @@
- import org.apache.hadoop.hdfs.protocol.HdfsFileStatus;
- import org.apache.hadoop.hdfs.protocol.LastBlockWithStatus;
- import org.apache.hadoop.hdfs.protocol.LayoutVersion;
-+import org.apache.hadoop.hdfs.server.blockmanagement.BlockIdManager;
- import org.apache.hadoop.hdfs.server.blockmanagement.BlockInfo;
- import org.apache.hadoop.hdfs.server.blockmanagement.BlockInfoContiguous;
- import org.apache.hadoop.hdfs.server.blockmanagement.BlockInfoUnderConstruction;
-@@ -788,8 +789,15 @@ private long applyEditLogOp(FSEditLogOp op, FSDirectory fsDir,
-     }
-     case OP_ALLOCATE_BLOCK_ID: {
-       AllocateBlockIdOp allocateBlockIdOp = (AllocateBlockIdOp) op;
--      fsNamesys.getBlockIdManager().setLastAllocatedBlockId(
--          allocateBlockIdOp.blockId);
-+      if (BlockIdManager.isStripedBlockID(allocateBlockIdOp.blockId)) {
-+        // ALLOCATE_BLOCK_ID is added for sequential block id, thus if the id
-+        // is negative, it must belong to striped blocks
-+        fsNamesys.getBlockIdManager().setLastAllocatedStripedBlockId(
-+            allocateBlockIdOp.blockId);
-+      } else {
-+        fsNamesys.getBlockIdManager().setLastAllocatedContiguousBlockId(
-+            allocateBlockIdOp.blockId);
-+      }
-       break;
-     }
-     case OP_ROLLING_UPGRADE_START: {
-diff --git a/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/namenode/FSImageFormat.java b/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/namenode/FSImageFormat.java
-index 2305e31..6bdf984 100644
---- a/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/namenode/FSImageFormat.java
-+++ b/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/namenode/FSImageFormat.java
-@@ -359,7 +359,8 @@ public void load(File curFile) throws IOException {
- 
-           // read the max sequential block ID.
-           long maxSequentialBlockId = in.readLong();
--          namesystem.getBlockIdManager().setLastAllocatedBlockId(maxSequentialBlockId);
-+          namesystem.getBlockIdManager().
-+              setLastAllocatedContiguousBlockId(maxSequentialBlockId);
-         } else {
- 
-           long startingGenStamp = namesystem.getBlockIdManager()
-@@ -1270,7 +1271,7 @@ void save(File newFile, FSImageCompression compression) throws IOException {
-         out.writeLong(sourceNamesystem.getBlockIdManager().getGenerationStampV1());
-         out.writeLong(sourceNamesystem.getBlockIdManager().getGenerationStampV2());
-         out.writeLong(sourceNamesystem.getBlockIdManager().getGenerationStampAtblockIdSwitch());
--        out.writeLong(sourceNamesystem.getBlockIdManager().getLastAllocatedBlockId());
-+        out.writeLong(sourceNamesystem.getBlockIdManager().getLastAllocatedContiguousBlockId());
-         out.writeLong(context.getTxId());
-         out.writeLong(sourceNamesystem.dir.getLastInodeId());
- 
-diff --git a/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/namenode/FSImageFormatProtobuf.java b/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/namenode/FSImageFormatProtobuf.java
-index 7c8a857..ef0cc1d 100644
---- a/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/namenode/FSImageFormatProtobuf.java
-+++ b/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/namenode/FSImageFormatProtobuf.java
-@@ -297,7 +297,11 @@ private void loadNameSystemSection(InputStream in) throws IOException {
-       blockIdManager.setGenerationStampV1(s.getGenstampV1());
-       blockIdManager.setGenerationStampV2(s.getGenstampV2());
-       blockIdManager.setGenerationStampV1Limit(s.getGenstampV1Limit());
--      blockIdManager.setLastAllocatedBlockId(s.getLastAllocatedBlockId());
-+      blockIdManager.setLastAllocatedContiguousBlockId(s.getLastAllocatedBlockId());
-+      if (s.hasLastAllocatedStripedBlockId()) {
-+        blockIdManager.setLastAllocatedStripedBlockId(
-+            s.getLastAllocatedStripedBlockId());
-+      }
-       imgTxId = s.getTransactionId();
-       if (s.hasRollingUpgradeStartTime()
-           && fsn.getFSImage().hasRollbackFSImage()) {
-@@ -549,7 +553,8 @@ private void saveNameSystemSection(FileSummary.Builder summary)
-           .setGenstampV1(blockIdManager.getGenerationStampV1())
-           .setGenstampV1Limit(blockIdManager.getGenerationStampV1Limit())
-           .setGenstampV2(blockIdManager.getGenerationStampV2())
--          .setLastAllocatedBlockId(blockIdManager.getLastAllocatedBlockId())
-+          .setLastAllocatedBlockId(blockIdManager.getLastAllocatedContiguousBlockId())
-+          .setLastAllocatedStripedBlockId(blockIdManager.getLastAllocatedStripedBlockId())
-           .setTransactionId(context.getTxId());
- 
-       // We use the non-locked version of getNamespaceInfo here since
 diff --git a/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/namenode/FSNamesystem.java b/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/namenode/FSNamesystem.java
-index 5830b45..545845e 100644
+index b3cedbc..545845e 100644
 --- a/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/namenode/FSNamesystem.java
 +++ b/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/namenode/FSNamesystem.java
 @@ -4518,14 +4518,21 @@ private synchronized void setBlockTotal(int total) {
@@ -792,15 +483,6 @@ index 5830b45..545845e 100644
    }
  
    @Override
-@@ -5326,7 +5333,7 @@ long nextGenerationStamp(boolean legacyBlock)
-   private long nextBlockId() throws IOException {
-     assert hasWriteLock();
-     checkNameNodeSafeMode("Cannot get next block ID");
--    final long blockId = blockIdManager.nextBlockId();
-+    final long blockId = blockIdManager.nextContiguousBlockId();
-     getEditLog().logAllocateBlockId(blockId);
-     // NB: callers sync the log
-     return blockId;
 diff --git a/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/namenode/SafeMode.java b/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/namenode/SafeMode.java
 index 1428482..5078c44 100644
 --- a/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/namenode/SafeMode.java
@@ -822,3 +504,42 @@ index 1428482..5078c44 100644
  
    /** Decrement number of blocks that reached minimal replication. */
    public void decrementSafeBlockCount(BlockInfo b);
+diff --git a/hadoop-hdfs-project/hadoop-hdfs/src/test/java/org/apache/hadoop/hdfs/server/blockmanagement/TestBlockInfoStriped.java b/hadoop-hdfs-project/hadoop-hdfs/src/test/java/org/apache/hadoop/hdfs/server/blockmanagement/TestBlockInfoStriped.java
+index 319615f..7a98259 100644
+--- a/hadoop-hdfs-project/hadoop-hdfs/src/test/java/org/apache/hadoop/hdfs/server/blockmanagement/TestBlockInfoStriped.java
++++ b/hadoop-hdfs-project/hadoop-hdfs/src/test/java/org/apache/hadoop/hdfs/server/blockmanagement/TestBlockInfoStriped.java
+@@ -202,6 +202,34 @@ public void testRemoveStorage() {
+   }
+ 
+   @Test
++  public void testReplaceBlock() {
++    DatanodeStorageInfo[] storages = DFSTestUtil.createDatanodeStorageInfos(
++        TOTAL_NUM_BLOCKS);
++    Block[] blocks = createReportedBlocks(TOTAL_NUM_BLOCKS);
++    // add block/storage 0, 2, 4 into the BlockInfoStriped
++    for (int i = 0; i < storages.length; i += 2) {
++      Assert.assertEquals(AddBlockResult.ADDED,
++          storages[i].addBlock(info, blocks[i]));
++    }
++
++    BlockInfoStriped newBlockInfo = new BlockInfoStriped(info);
++    info.replaceBlock(newBlockInfo);
++
++    // make sure the newBlockInfo is correct
++    byte[] indices = (byte[]) Whitebox.getInternalState(newBlockInfo, "indices");
++    for (int i = 0; i < storages.length; i += 2) {
++      int index = newBlockInfo.findStorageInfo(storages[i]);
++      Assert.assertEquals(i, index);
++      Assert.assertEquals(index, indices[i]);
++
++      // make sure the newBlockInfo is added to the linked list of the storage
++      Assert.assertSame(newBlockInfo, storages[i].getBlockListHeadForTesting());
++      Assert.assertEquals(1, storages[i].numBlocks());
++      Assert.assertNull(newBlockInfo.getNext());
++    }
++  }
++
++  @Test
+   public void testWrite() {
+     long blkID = 1;
+     long numBytes = 1;

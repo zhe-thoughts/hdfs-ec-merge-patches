@@ -41,6 +41,78 @@ index ab41911..74a67af 100644
 +  @Idempotent
 +  public ErasureCodingZone getErasureCodingZone(String src) throws IOException;
  }
+diff --git a/hadoop-hdfs-project/hadoop-hdfs-client/src/main/java/org/apache/hadoop/hdfs/protocol/ErasureCodingZone.java b/hadoop-hdfs-project/hadoop-hdfs-client/src/main/java/org/apache/hadoop/hdfs/protocol/ErasureCodingZone.java
+new file mode 100644
+index 0000000..655def3
+--- /dev/null
++++ b/hadoop-hdfs-project/hadoop-hdfs-client/src/main/java/org/apache/hadoop/hdfs/protocol/ErasureCodingZone.java
+@@ -0,0 +1,66 @@
++/**
++ * Licensed to the Apache Software Foundation (ASF) under one or more
++ * contributor license agreements. See the NOTICE file distributed with this
++ * work for additional information regarding copyright ownership. The ASF
++ * licenses this file to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ * 
++ * http://www.apache.org/licenses/LICENSE-2.0
++ * 
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
++ * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
++ * License for the specific language governing permissions and limitations under
++ * the License.
++ */
++package org.apache.hadoop.hdfs.protocol;
++
++import org.apache.hadoop.io.erasurecode.ECSchema;
++
++/**
++ * Information about the EC Zone at the specified path.
++ */
++public class ErasureCodingZone {
++
++  private String dir;
++  private ECSchema schema;
++  private int cellSize;
++
++  public ErasureCodingZone(String dir, ECSchema schema, int cellSize) {
++    this.dir = dir;
++    this.schema = schema;
++    this.cellSize = cellSize;
++  }
++
++  /**
++   * Get directory of the EC zone.
++   * 
++   * @return
++   */
++  public String getDir() {
++    return dir;
++  }
++
++  /**
++   * Get the schema for the EC Zone
++   * 
++   * @return
++   */
++  public ECSchema getSchema() {
++    return schema;
++  }
++
++  /**
++   * Get cellSize for the EC Zone
++   */
++  public int getCellSize() {
++    return cellSize;
++  }
++
++  @Override
++  public String toString() {
++    return "Dir: " + getDir() + ", Schema: " + schema + ", cellSize: "
++        + cellSize;
++  }
++}
 diff --git a/hadoop-hdfs-project/hadoop-hdfs-client/src/main/java/org/apache/hadoop/hdfs/protocol/HdfsConstants.java b/hadoop-hdfs-project/hadoop-hdfs-client/src/main/java/org/apache/hadoop/hdfs/protocol/HdfsConstants.java
 index 58c7ea1..a527e23 100644
 --- a/hadoop-hdfs-project/hadoop-hdfs-client/src/main/java/org/apache/hadoop/hdfs/protocol/HdfsConstants.java
@@ -132,7 +204,7 @@ index ac19d44..a6c7b10 100644
      this.snapshotQuota = snapshotQuota;
      this.parentFullPath = parentFullPath;
 diff --git a/hadoop-hdfs-project/hadoop-hdfs-client/src/main/java/org/apache/hadoop/hdfs/web/JsonUtilClient.java b/hadoop-hdfs-project/hadoop-hdfs-client/src/main/java/org/apache/hadoop/hdfs/web/JsonUtilClient.java
-index 713836c..eeadd73 100644
+index 713836c..5ce6c85 100644
 --- a/hadoop-hdfs-project/hadoop-hdfs-client/src/main/java/org/apache/hadoop/hdfs/web/JsonUtilClient.java
 +++ b/hadoop-hdfs-project/hadoop-hdfs-client/src/main/java/org/apache/hadoop/hdfs/web/JsonUtilClient.java
 @@ -132,7 +132,7 @@ static HdfsFileStatus toFileStatus(final Map<?, ?> json, boolean includesType) {
@@ -144,15 +216,6 @@ index 713836c..eeadd73 100644
    }
  
    /** Convert a Json map to an ExtendedBlock object. */
-@@ -503,7 +503,7 @@ static LocatedBlocks toLocatedBlocks(
-         (Map<?, ?>) m.get("lastLocatedBlock"));
-     final boolean isLastBlockComplete = (Boolean)m.get("isLastBlockComplete");
-     return new LocatedBlocks(fileLength, isUnderConstruction, locatedBlocks,
--        lastLocatedBlock, isLastBlockComplete, null);
-+        lastLocatedBlock, isLastBlockComplete, null, null, 0);
-   }
- 
- }
 diff --git a/hadoop-hdfs-project/hadoop-hdfs/pom.xml b/hadoop-hdfs-project/hadoop-hdfs/pom.xml
 index f90644c..090923a 100644
 --- a/hadoop-hdfs-project/hadoop-hdfs/pom.xml
@@ -409,78 +472,6 @@ index 84499bb..5a3c885 100644
 +    return dfs.getClient().getECSchemas();
 +  }
  }
-diff --git a/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/protocol/ErasureCodingZone.java b/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/protocol/ErasureCodingZone.java
-new file mode 100644
-index 0000000..655def3
---- /dev/null
-+++ b/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/protocol/ErasureCodingZone.java
-@@ -0,0 +1,66 @@
-+/**
-+ * Licensed to the Apache Software Foundation (ASF) under one or more
-+ * contributor license agreements. See the NOTICE file distributed with this
-+ * work for additional information regarding copyright ownership. The ASF
-+ * licenses this file to you under the Apache License, Version 2.0 (the
-+ * "License"); you may not use this file except in compliance with the License.
-+ * You may obtain a copy of the License at
-+ * 
-+ * http://www.apache.org/licenses/LICENSE-2.0
-+ * 
-+ * Unless required by applicable law or agreed to in writing, software
-+ * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
-+ * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
-+ * License for the specific language governing permissions and limitations under
-+ * the License.
-+ */
-+package org.apache.hadoop.hdfs.protocol;
-+
-+import org.apache.hadoop.io.erasurecode.ECSchema;
-+
-+/**
-+ * Information about the EC Zone at the specified path.
-+ */
-+public class ErasureCodingZone {
-+
-+  private String dir;
-+  private ECSchema schema;
-+  private int cellSize;
-+
-+  public ErasureCodingZone(String dir, ECSchema schema, int cellSize) {
-+    this.dir = dir;
-+    this.schema = schema;
-+    this.cellSize = cellSize;
-+  }
-+
-+  /**
-+   * Get directory of the EC zone.
-+   * 
-+   * @return
-+   */
-+  public String getDir() {
-+    return dir;
-+  }
-+
-+  /**
-+   * Get the schema for the EC Zone
-+   * 
-+   * @return
-+   */
-+  public ECSchema getSchema() {
-+    return schema;
-+  }
-+
-+  /**
-+   * Get cellSize for the EC Zone
-+   */
-+  public int getCellSize() {
-+    return cellSize;
-+  }
-+
-+  @Override
-+  public String toString() {
-+    return "Dir: " + getDir() + ", Schema: " + schema + ", cellSize: "
-+        + cellSize;
-+  }
-+}
 diff --git a/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/protocol/HdfsLocatedFileStatus.java b/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/protocol/HdfsLocatedFileStatus.java
 index 23e8f57..4701538 100644
 --- a/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/protocol/HdfsLocatedFileStatus.java
@@ -693,7 +684,7 @@ index 4ec6f9e..850b58b 100644
 +  }
  }
 diff --git a/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/protocolPB/PBHelper.java b/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/protocolPB/PBHelper.java
-index 32d9614..28bac77 100644
+index 32d9614..6287116 100644
 --- a/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/protocolPB/PBHelper.java
 +++ b/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/protocolPB/PBHelper.java
 @@ -28,8 +28,13 @@
@@ -718,18 +709,19 @@ index 32d9614..28bac77 100644
  import org.apache.hadoop.hdfs.protocol.FsPermissionExtension;
  import org.apache.hadoop.hdfs.protocol.HdfsConstants;
  import org.apache.hadoop.hdfs.protocol.HdfsConstants.DatanodeReportType;
-@@ -125,7 +131,9 @@
+@@ -125,7 +131,11 @@
  import org.apache.hadoop.hdfs.protocol.proto.DatanodeProtocolProtos.RegisterCommandProto;
  import org.apache.hadoop.hdfs.protocol.proto.DatanodeProtocolProtos.VolumeFailureSummaryProto;
  import org.apache.hadoop.hdfs.protocol.proto.DatanodeProtocolProtos.BlockReportContextProto;
--import org.apache.hadoop.hdfs.protocol.proto.HdfsProtos;
++import org.apache.hadoop.hdfs.protocol.proto.ErasureCodingProtos;
+ import org.apache.hadoop.hdfs.protocol.proto.HdfsProtos;
 +import org.apache.hadoop.hdfs.protocol.proto.ErasureCodingProtos.ErasureCodingZoneProto;
 +import org.apache.hadoop.hdfs.protocol.proto.HdfsProtos.ECSchemaOptionEntryProto;
 +import org.apache.hadoop.hdfs.protocol.proto.HdfsProtos.ECSchemaProto;
  import org.apache.hadoop.hdfs.protocol.proto.HdfsProtos.BlockKeyProto;
  import org.apache.hadoop.hdfs.protocol.proto.HdfsProtos.BlockProto;
  import org.apache.hadoop.hdfs.protocol.proto.HdfsProtos.BlockStoragePolicyProto;
-@@ -223,6 +231,7 @@
+@@ -223,6 +233,7 @@
  import org.apache.hadoop.hdfs.util.ExactSizeInputStream;
  import org.apache.hadoop.io.EnumSetWritable;
  import org.apache.hadoop.io.Text;
@@ -737,32 +729,17 @@ index 32d9614..28bac77 100644
  import org.apache.hadoop.security.proto.SecurityProtos.TokenProto;
  import org.apache.hadoop.security.token.Token;
  import org.apache.hadoop.util.DataChecksum;
-@@ -1283,8 +1292,9 @@ public static LocatedBlocks convert(LocatedBlocksProto lb) {
+@@ -1283,8 +1294,7 @@ public static LocatedBlocks convert(LocatedBlocksProto lb) {
          PBHelper.convertLocatedBlock(lb.getBlocksList()),
          lb.hasLastBlock() ? PBHelper.convert(lb.getLastBlock()) : null,
          lb.getIsLastBlockComplete(),
 -        lb.hasFileEncryptionInfo() ? convert(lb.getFileEncryptionInfo()) :
 -            null);
-+        lb.hasFileEncryptionInfo() ? convert(lb.getFileEncryptionInfo()) : null,
-+        lb.hasECSchema() ? convertECSchema(lb.getECSchema()) : null,
-+        lb.hasStripeCellSize() ? lb.getStripeCellSize() : 0);
++        lb.hasFileEncryptionInfo() ? convert(lb.getFileEncryptionInfo()) : null);
    }
    
    public static LocatedBlocksProto convert(LocatedBlocks lb) {
-@@ -1299,6 +1309,12 @@ public static LocatedBlocksProto convert(LocatedBlocks lb) {
-     if (lb.getFileEncryptionInfo() != null) {
-       builder.setFileEncryptionInfo(convert(lb.getFileEncryptionInfo()));
-     }
-+    if (lb.getECSchema() != null) {
-+      builder.setECSchema(convertECSchema(lb.getECSchema()));
-+    }
-+    if (lb.getStripeCellSize() != 0) {
-+      builder.setStripeCellSize(lb.getStripeCellSize());
-+    }
-     return builder.setFileLength(lb.getFileLength())
-         .setUnderConstruction(lb.isUnderConstruction())
-         .addAllBlocks(PBHelper.convertLocatedBlock2(lb.getLocatedBlocks()))
-@@ -1441,7 +1457,9 @@ public static HdfsFileStatus convert(HdfsFileStatusProto fs) {
+@@ -1441,7 +1451,9 @@ public static HdfsFileStatus convert(HdfsFileStatusProto fs) {
          fs.hasChildrenNum() ? fs.getChildrenNum() : -1,
          fs.hasFileEncryptionInfo() ? convert(fs.getFileEncryptionInfo()) : null,
          fs.hasStoragePolicy() ? (byte) fs.getStoragePolicy()
@@ -773,7 +750,7 @@ index 32d9614..28bac77 100644
    }
  
    public static SnapshottableDirectoryStatus convert(
-@@ -1502,6 +1520,10 @@ public static HdfsFileStatusProto convert(HdfsFileStatus fs) {
+@@ -1502,6 +1514,10 @@ public static HdfsFileStatusProto convert(HdfsFileStatus fs) {
          builder.setLocations(PBHelper.convert(locations));
        }
      }
@@ -784,7 +761,7 @@ index 32d9614..28bac77 100644
      return builder.build();
    }
    
-@@ -3053,4 +3075,41 @@ public static BlockReportContextProto convert(BlockReportContext context) {
+@@ -3053,4 +3069,41 @@ public static BlockReportContextProto convert(BlockReportContext context) {
          setLeaseId(context.getLeaseId()).
          build();
    }
@@ -2125,3 +2102,1096 @@ index 0000000..e656659
 +message GetErasureCodingZoneResponseProto {
 +  optional ErasureCodingZoneProto ECZone = 1;
 +}
+diff --git a/hadoop-hdfs-project/hadoop-hdfs/src/main/proto/hdfs.proto b/hadoop-hdfs-project/hadoop-hdfs/src/main/proto/hdfs.proto
+index 86fb462..0b387f0 100644
+--- a/hadoop-hdfs-project/hadoop-hdfs/src/main/proto/hdfs.proto
++++ b/hadoop-hdfs-project/hadoop-hdfs/src/main/proto/hdfs.proto
+@@ -303,6 +303,25 @@ message LocatedBlocksProto {
+ }
+ 
+ /**
++ * ECSchema options entry
++ */
++message ECSchemaOptionEntryProto {
++  required string key = 1;
++  required string value = 2;
++}
++
++/**
++ * ECSchema for erasurecoding
++ */
++message ECSchemaProto {
++  required string schemaName = 1;
++  required string codecName = 2;
++  required uint32 dataUnits = 3;
++  required uint32 parityUnits = 4;
++  repeated ECSchemaOptionEntryProto options = 5;
++}
++
++/**
+  * Status of a file, directory or symlink
+  * Optionally includes a file's block locations if requested by client on the rpc call.
+  */
+@@ -336,7 +355,11 @@ message HdfsFileStatusProto {
+   optional FileEncryptionInfoProto fileEncryptionInfo = 15;
+ 
+   optional uint32 storagePolicy = 16 [default = 0]; // block storage policy id
+-} 
++
++  // Optional field for erasure coding
++  optional ECSchemaProto ecSchema = 17;
++  optional uint32 stripeCellSize = 18;
++}
+ 
+ /**
+  * Checksum algorithms/types used in HDFS
+diff --git a/hadoop-hdfs-project/hadoop-hdfs/src/test/java/org/apache/hadoop/cli/CLITestCmdErasureCoding.java b/hadoop-hdfs-project/hadoop-hdfs/src/test/java/org/apache/hadoop/cli/CLITestCmdErasureCoding.java
+new file mode 100644
+index 0000000..6c06a8d
+--- /dev/null
++++ b/hadoop-hdfs-project/hadoop-hdfs/src/test/java/org/apache/hadoop/cli/CLITestCmdErasureCoding.java
+@@ -0,0 +1,38 @@
++/**
++ * Licensed to the Apache Software Foundation (ASF) under one
++ * or more contributor license agreements.  See the NOTICE file
++ * distributed with this work for additional information
++ * regarding copyright ownership.  The ASF licenses this file
++ * to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance
++ * with the License.  You may obtain a copy of the License at
++ * <p/>
++ * http://www.apache.org/licenses/LICENSE-2.0
++ * <p/>
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package org.apache.hadoop.cli;
++
++import org.apache.hadoop.cli.util.CLICommandErasureCodingCli;
++import org.apache.hadoop.cli.util.CLICommandTypes;
++import org.apache.hadoop.cli.util.CLITestCmd;
++import org.apache.hadoop.cli.util.CommandExecutor;
++import org.apache.hadoop.cli.util.ErasureCodingCliCmdExecutor;
++import org.apache.hadoop.hdfs.tools.erasurecode.ECCli;
++
++public class CLITestCmdErasureCoding extends CLITestCmd {
++  public CLITestCmdErasureCoding(String str, CLICommandTypes type) {
++    super(str, type);
++  }
++
++  @Override
++  public CommandExecutor getExecutor(String tag) throws IllegalArgumentException {
++    if (getType() instanceof CLICommandErasureCodingCli)
++      return new ErasureCodingCliCmdExecutor(tag, new ECCli());
++    return super.getExecutor(tag);
++  }
++}
+diff --git a/hadoop-hdfs-project/hadoop-hdfs/src/test/java/org/apache/hadoop/cli/TestErasureCodingCLI.java b/hadoop-hdfs-project/hadoop-hdfs/src/test/java/org/apache/hadoop/cli/TestErasureCodingCLI.java
+new file mode 100644
+index 0000000..5f01ea2
+--- /dev/null
++++ b/hadoop-hdfs-project/hadoop-hdfs/src/test/java/org/apache/hadoop/cli/TestErasureCodingCLI.java
+@@ -0,0 +1,114 @@
++/**
++ * Licensed to the Apache Software Foundation (ASF) under one
++ * or more contributor license agreements.  See the NOTICE file
++ * distributed with this work for additional information
++ * regarding copyright ownership.  The ASF licenses this file
++ * to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance
++ * with the License.  You may obtain a copy of the License at
++ *
++ *     http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++package org.apache.hadoop.cli;
++
++import org.apache.hadoop.cli.util.CLICommand;
++import org.apache.hadoop.cli.util.CLICommandErasureCodingCli;
++import org.apache.hadoop.cli.util.CommandExecutor.Result;
++import org.apache.hadoop.fs.FileSystem;
++import org.apache.hadoop.hdfs.DFSConfigKeys;
++import org.apache.hadoop.hdfs.MiniDFSCluster;
++import org.junit.After;
++import org.junit.Before;
++import org.junit.Test;
++import org.xml.sax.SAXException;
++
++public class TestErasureCodingCLI extends CLITestHelper {
++  private final int NUM_OF_DATANODES = 3;
++  private MiniDFSCluster dfsCluster = null;
++  private FileSystem fs = null;
++  private String namenode = null;
++
++  @Before
++  @Override
++  public void setUp() throws Exception {
++    super.setUp();
++
++    dfsCluster = new MiniDFSCluster.Builder(conf)
++        .numDataNodes(NUM_OF_DATANODES).build();
++    dfsCluster.waitClusterUp();
++    namenode = conf.get(DFSConfigKeys.FS_DEFAULT_NAME_KEY, "file:///");
++
++    username = System.getProperty("user.name");
++
++    fs = dfsCluster.getFileSystem();
++  }
++
++  @Override
++  protected String getTestFile() {
++    return "testErasureCodingConf.xml";
++  }
++
++  @After
++  @Override
++  public void tearDown() throws Exception {
++    if (fs != null) {
++      fs.close();
++    }
++    if (dfsCluster != null) {
++      dfsCluster.shutdown();
++    }
++    Thread.sleep(2000);
++    super.tearDown();
++  }
++
++  @Override
++  protected String expandCommand(final String cmd) {
++    String expCmd = cmd;
++    expCmd = expCmd.replaceAll("NAMENODE", namenode);
++    expCmd = expCmd.replaceAll("#LF#", System.getProperty("line.separator"));
++    expCmd = super.expandCommand(expCmd);
++    return expCmd;
++  }
++
++  @Override
++  protected TestConfigFileParser getConfigParser() {
++    return new TestErasureCodingAdmin();
++  }
++
++  private class TestErasureCodingAdmin extends
++      CLITestHelper.TestConfigFileParser {
++    @Override
++    public void endElement(String uri, String localName, String qName)
++        throws SAXException {
++      if (qName.equals("ec-admin-command")) {
++        if (testCommands != null) {
++          testCommands.add(new CLITestCmdErasureCoding(charString,
++              new CLICommandErasureCodingCli()));
++        } else if (cleanupCommands != null) {
++          cleanupCommands.add(new CLITestCmdErasureCoding(charString,
++              new CLICommandErasureCodingCli()));
++        }
++      } else {
++        super.endElement(uri, localName, qName);
++      }
++    }
++  }
++
++  @Override
++  protected Result execute(CLICommand cmd) throws Exception {
++    return cmd.getExecutor(namenode).executeCommand(cmd.getCmd());
++  }
++
++  @Test
++  @Override
++  public void testAll() {
++    super.testAll();
++  }
++}
+diff --git a/hadoop-hdfs-project/hadoop-hdfs/src/test/java/org/apache/hadoop/cli/util/CLICommandErasureCodingCli.java b/hadoop-hdfs-project/hadoop-hdfs/src/test/java/org/apache/hadoop/cli/util/CLICommandErasureCodingCli.java
+new file mode 100644
+index 0000000..aafcd9f
+--- /dev/null
++++ b/hadoop-hdfs-project/hadoop-hdfs/src/test/java/org/apache/hadoop/cli/util/CLICommandErasureCodingCli.java
+@@ -0,0 +1,21 @@
++/**
++ * Licensed to the Apache Software Foundation (ASF) under one
++ * or more contributor license agreements.  See the NOTICE file
++ * distributed with this work for additional information
++ * regarding copyright ownership.  The ASF licenses this file
++ * to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance
++ * with the License.  You may obtain a copy of the License at
++ * <p/>
++ * http://www.apache.org/licenses/LICENSE-2.0
++ * <p/>
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package org.apache.hadoop.cli.util;
++
++public class CLICommandErasureCodingCli implements CLICommandTypes {
++}
+\ No newline at end of file
+diff --git a/hadoop-hdfs-project/hadoop-hdfs/src/test/java/org/apache/hadoop/cli/util/ErasureCodingCliCmdExecutor.java b/hadoop-hdfs-project/hadoop-hdfs/src/test/java/org/apache/hadoop/cli/util/ErasureCodingCliCmdExecutor.java
+new file mode 100644
+index 0000000..e993313
+--- /dev/null
++++ b/hadoop-hdfs-project/hadoop-hdfs/src/test/java/org/apache/hadoop/cli/util/ErasureCodingCliCmdExecutor.java
+@@ -0,0 +1,37 @@
++/**
++ * Licensed to the Apache Software Foundation (ASF) under one
++ * or more contributor license agreements.  See the NOTICE file
++ * distributed with this work for additional information
++ * regarding copyright ownership.  The ASF licenses this file
++ * to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance
++ * with the License.  You may obtain a copy of the License at
++ * <p/>
++ * http://www.apache.org/licenses/LICENSE-2.0
++ * <p/>
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package org.apache.hadoop.cli.util;
++
++import org.apache.hadoop.hdfs.tools.erasurecode.ECCli;
++import org.apache.hadoop.util.ToolRunner;
++
++public class ErasureCodingCliCmdExecutor extends CommandExecutor {
++  protected String namenode = null;
++  protected ECCli admin = null;
++
++  public ErasureCodingCliCmdExecutor(String namenode, ECCli admin) {
++    this.namenode = namenode;
++    this.admin = admin;
++  }
++
++  @Override
++  protected void execute(final String cmd) throws Exception {
++    String[] args = getCommandAsArgs(cmd, "NAMENODE", this.namenode);
++    ToolRunner.run(admin, args);
++  }
++}
+diff --git a/hadoop-hdfs-project/hadoop-hdfs/src/test/java/org/apache/hadoop/hdfs/TestDFSClientRetries.java b/hadoop-hdfs-project/hadoop-hdfs/src/test/java/org/apache/hadoop/hdfs/TestDFSClientRetries.java
+index 43e0eb9..8e850dc 100644
+--- a/hadoop-hdfs-project/hadoop-hdfs/src/test/java/org/apache/hadoop/hdfs/TestDFSClientRetries.java
++++ b/hadoop-hdfs-project/hadoop-hdfs/src/test/java/org/apache/hadoop/hdfs/TestDFSClientRetries.java
+@@ -255,12 +255,13 @@ public Object answer(InvocationOnMock invocation)
+     Mockito.doReturn(
+             new HdfsFileStatus(0, false, 1, 1024, 0, 0, new FsPermission(
+                 (short) 777), "owner", "group", new byte[0], new byte[0],
+-                1010, 0, null, (byte) 0)).when(mockNN).getFileInfo(anyString());
++                1010, 0, null, (byte) 0, null, 0)).when(mockNN).
++        getFileInfo(anyString());
+     
+     Mockito.doReturn(
+             new HdfsFileStatus(0, false, 1, 1024, 0, 0, new FsPermission(
+                 (short) 777), "owner", "group", new byte[0], new byte[0],
+-                1010, 0, null, (byte) 0))
++                1010, 0, null, (byte) 0, null, 0))
+         .when(mockNN)
+         .create(anyString(), (FsPermission) anyObject(), anyString(),
+             (EnumSetWritable<CreateFlag>) anyObject(), anyBoolean(),
+diff --git a/hadoop-hdfs-project/hadoop-hdfs/src/test/java/org/apache/hadoop/hdfs/TestECSchemas.java b/hadoop-hdfs-project/hadoop-hdfs/src/test/java/org/apache/hadoop/hdfs/TestECSchemas.java
+new file mode 100644
+index 0000000..88198c9
+--- /dev/null
++++ b/hadoop-hdfs-project/hadoop-hdfs/src/test/java/org/apache/hadoop/hdfs/TestECSchemas.java
+@@ -0,0 +1,54 @@
++/**
++ * Licensed to the Apache Software Foundation (ASF) under one
++ * or more contributor license agreements.  See the NOTICE file
++ * distributed with this work for additional information
++ * regarding copyright ownership.  The ASF licenses this file
++ * to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance
++ * with the License.  You may obtain a copy of the License at
++ *
++ *     http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package org.apache.hadoop.hdfs;
++
++import static org.junit.Assert.*;
++
++import java.io.IOException;
++
++import org.apache.hadoop.conf.Configuration;
++import org.apache.hadoop.hdfs.server.namenode.ErasureCodingSchemaManager;
++import org.apache.hadoop.io.erasurecode.ECSchema;
++import org.junit.After;
++import org.junit.Before;
++import org.junit.Test;
++
++public class TestECSchemas {
++  private MiniDFSCluster cluster;
++
++  @Before
++  public void before() throws IOException {
++    cluster = new MiniDFSCluster.Builder(new Configuration()).numDataNodes(0)
++        .build();
++    cluster.waitActive();
++  }
++
++  @After
++  public void after() {
++    if (cluster != null) {
++      cluster.shutdown();
++    }
++  }
++
++  @Test
++  public void testGetECSchemas() throws Exception {
++    ECSchema[] ecSchemas = cluster.getFileSystem().getClient().getECSchemas();
++    assertNotNull(ecSchemas);
++    assertTrue("Should have at least one schema", ecSchemas.length > 0);
++  }
++}
+diff --git a/hadoop-hdfs-project/hadoop-hdfs/src/test/java/org/apache/hadoop/hdfs/TestEncryptionZones.java b/hadoop-hdfs-project/hadoop-hdfs/src/test/java/org/apache/hadoop/hdfs/TestEncryptionZones.java
+index e0bd6f4..1f317b8 100644
+--- a/hadoop-hdfs-project/hadoop-hdfs/src/test/java/org/apache/hadoop/hdfs/TestEncryptionZones.java
++++ b/hadoop-hdfs-project/hadoop-hdfs/src/test/java/org/apache/hadoop/hdfs/TestEncryptionZones.java
+@@ -737,7 +737,7 @@ private static void mockCreate(ClientProtocol mcp,
+             version, new byte[suite.getAlgorithmBlockSize()],
+             new byte[suite.getAlgorithmBlockSize()],
+             "fakeKey", "fakeVersion"),
+-            (byte) 0))
++            (byte) 0, null, 0))
+         .when(mcp)
+         .create(anyString(), (FsPermission) anyObject(), anyString(),
+             (EnumSetWritable<CreateFlag>) anyObject(), anyBoolean(),
+diff --git a/hadoop-hdfs-project/hadoop-hdfs/src/test/java/org/apache/hadoop/hdfs/TestErasureCodingZones.java b/hadoop-hdfs-project/hadoop-hdfs/src/test/java/org/apache/hadoop/hdfs/TestErasureCodingZones.java
+new file mode 100644
+index 0000000..34a0820
+--- /dev/null
++++ b/hadoop-hdfs-project/hadoop-hdfs/src/test/java/org/apache/hadoop/hdfs/TestErasureCodingZones.java
+@@ -0,0 +1,197 @@
++/**
++ * Licensed to the Apache Software Foundation (ASF) under one
++ * or more contributor license agreements.  See the NOTICE file
++ * distributed with this work for additional information
++ * regarding copyright ownership.  The ASF licenses this file
++ * to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance
++ * with the License.  You may obtain a copy of the License at
++ *
++ *     http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package org.apache.hadoop.hdfs;
++
++import org.apache.hadoop.conf.Configuration;
++import org.apache.hadoop.fs.CommonConfigurationKeys;
++import org.apache.hadoop.fs.Path;
++import org.apache.hadoop.fs.permission.FsPermission;
++import org.apache.hadoop.hdfs.protocol.HdfsFileStatus;
++import org.apache.hadoop.hdfs.server.namenode.ErasureCodingSchemaManager;
++import org.apache.hadoop.hdfs.server.namenode.FSNamesystem;
++import org.apache.hadoop.hdfs.server.namenode.INode;
++import org.apache.hadoop.io.erasurecode.ECSchema;
++import org.junit.After;
++import org.junit.Before;
++import org.junit.Test;
++
++import java.io.IOException;
++
++import static org.apache.hadoop.test.GenericTestUtils.assertExceptionContains;
++import static org.junit.Assert.*;
++
++public class TestErasureCodingZones {
++  private Configuration conf;
++  private MiniDFSCluster cluster;
++  private DistributedFileSystem fs;
++  private static final int BLOCK_SIZE = 1024;
++  private FSNamesystem namesystem;
++
++  @Before
++  public void setupCluster() throws IOException {
++    conf = new HdfsConfiguration();
++    conf.setInt(DFSConfigKeys.DFS_BLOCK_SIZE_KEY, BLOCK_SIZE);
++    cluster = new MiniDFSCluster.Builder(conf).
++        numDataNodes(1).build();
++    cluster.waitActive();
++    fs = cluster.getFileSystem();
++    namesystem = cluster.getNamesystem();
++  }
++
++  @After
++  public void shutdownCluster() throws IOException {
++    cluster.shutdown();
++  }
++
++  @Test
++  public void testCreateECZone()
++      throws IOException, InterruptedException {
++    final Path testDir = new Path("/ec");
++    fs.mkdir(testDir, FsPermission.getDirDefault());
++
++    /* Normal creation of an erasure coding zone */
++    fs.getClient().createErasureCodingZone(testDir.toString(), null, 0);
++
++    /* Verify that EC zone cannot be created on non-empty dir */
++    final Path notEmpty = new Path("/nonEmpty");
++    fs.mkdir(notEmpty, FsPermission.getDirDefault());
++    fs.create(new Path(notEmpty, "foo"));
++    try {
++      fs.getClient().createErasureCodingZone(notEmpty.toString(), null, 0);
++      fail("Erasure coding zone on non-empty dir");
++    } catch (IOException e) {
++      assertExceptionContains("erasure coding zone for a non-empty directory", e);
++    }
++
++    /* Verify that nested EC zones cannot be created */
++    final Path zone1 = new Path("/zone1");
++    final Path zone2 = new Path(zone1, "zone2");
++    fs.mkdir(zone1, FsPermission.getDirDefault());
++    fs.getClient().createErasureCodingZone(zone1.toString(), null, 0);
++    fs.mkdir(zone2, FsPermission.getDirDefault());
++    try {
++      fs.getClient().createErasureCodingZone(zone2.toString(), null, 0);
++      fail("Nested erasure coding zones");
++    } catch (IOException e) {
++      assertExceptionContains("already in an erasure coding zone", e);
++    }
++
++    /* Verify that EC zone cannot be created on a file */
++    final Path fPath = new Path("/file");
++    fs.create(fPath);
++    try {
++      fs.getClient().createErasureCodingZone(fPath.toString(), null, 0);
++      fail("Erasure coding zone on file");
++    } catch (IOException e) {
++      assertExceptionContains("erasure coding zone for a file", e);
++    }
++  }
++
++  @Test
++  public void testMoveValidity() throws IOException, InterruptedException {
++    final Path srcECDir = new Path("/srcEC");
++    final Path dstECDir = new Path("/dstEC");
++    fs.mkdir(srcECDir, FsPermission.getDirDefault());
++    fs.mkdir(dstECDir, FsPermission.getDirDefault());
++    fs.getClient().createErasureCodingZone(srcECDir.toString(), null, 0);
++    fs.getClient().createErasureCodingZone(dstECDir.toString(), null, 0);
++    final Path srcFile = new Path(srcECDir, "foo");
++    fs.create(srcFile);
++
++    // Test move dir
++    // Move EC dir under non-EC dir
++    final Path newDir = new Path("/srcEC_new");
++    fs.rename(srcECDir, newDir);
++    fs.rename(newDir, srcECDir); // move back
++
++    // Move EC dir under another EC dir
++    fs.rename(srcECDir, dstECDir);
++    fs.rename(new Path("/dstEC/srcEC"), srcECDir); // move back
++
++    // Test move file
++    /* Verify that a file can be moved between 2 EC zones */
++    fs.rename(srcFile, dstECDir);
++    fs.rename(new Path(dstECDir, "foo"), srcECDir); // move back
++
++    /* Verify that a file cannot be moved from a non-EC dir to an EC zone */
++    final Path nonECDir = new Path("/nonEC");
++    fs.mkdir(nonECDir, FsPermission.getDirDefault());
++    try {
++      fs.rename(srcFile, nonECDir);
++      fail("A file shouldn't be able to move from a non-EC dir to an EC zone");
++    } catch (IOException e) {
++      assertExceptionContains("can't be moved because the source and " +
++          "destination have different erasure coding policies", e);
++    }
++
++    /* Verify that a file cannot be moved from an EC zone to a non-EC dir */
++    final Path nonECFile = new Path(nonECDir, "nonECFile");
++    fs.create(nonECFile);
++    try {
++      fs.rename(nonECFile, dstECDir);
++    } catch (IOException e) {
++      assertExceptionContains("can't be moved because the source and " +
++          "destination have different erasure coding policies", e);
++    }
++  }
++
++  @Test
++  public void testGetErasureCodingInfoWithSystemDefaultSchema() throws Exception {
++    String src = "/ec";
++    final Path ecDir = new Path(src);
++    fs.mkdir(ecDir, FsPermission.getDirDefault());
++    // dir ECInfo before creating ec zone
++    assertNull(fs.getClient().getFileInfo(src).getECSchema());
++    // dir ECInfo after creating ec zone
++    fs.getClient().createErasureCodingZone(src, null, 0); //Default one will be used.
++    ECSchema sysDefaultSchema = ErasureCodingSchemaManager.getSystemDefaultSchema();
++    verifyErasureCodingInfo(src, sysDefaultSchema);
++    fs.create(new Path(ecDir, "child1")).close();
++    // verify for the files in ec zone
++    verifyErasureCodingInfo(src + "/child1", sysDefaultSchema);
++  }
++
++  @Test
++  public void testGetErasureCodingInfo() throws Exception {
++    ECSchema[] sysSchemas = ErasureCodingSchemaManager.getSystemSchemas();
++    assertTrue("System schemas should be of only 1 for now",
++        sysSchemas.length == 1);
++
++    ECSchema usingSchema = sysSchemas[0];
++    String src = "/ec2";
++    final Path ecDir = new Path(src);
++    fs.mkdir(ecDir, FsPermission.getDirDefault());
++    // dir ECInfo before creating ec zone
++    assertNull(fs.getClient().getFileInfo(src).getECSchema());
++    // dir ECInfo after creating ec zone
++    fs.getClient().createErasureCodingZone(src, usingSchema, 0);
++    verifyErasureCodingInfo(src, usingSchema);
++    fs.create(new Path(ecDir, "child1")).close();
++    // verify for the files in ec zone
++    verifyErasureCodingInfo(src + "/child1", usingSchema);
++  }
++
++  private void verifyErasureCodingInfo(
++      String src, ECSchema usingSchema) throws IOException {
++    HdfsFileStatus hdfsFileStatus = fs.getClient().getFileInfo(src);
++    ECSchema schema = hdfsFileStatus.getECSchema();
++    assertNotNull(schema);
++    assertEquals("Actually used schema should be equal with target schema",
++        usingSchema, schema);
++  }
++}
+diff --git a/hadoop-hdfs-project/hadoop-hdfs/src/test/java/org/apache/hadoop/hdfs/TestFileStatusWithECschema.java b/hadoop-hdfs-project/hadoop-hdfs/src/test/java/org/apache/hadoop/hdfs/TestFileStatusWithECschema.java
+new file mode 100644
+index 0000000..3c400b7
+--- /dev/null
++++ b/hadoop-hdfs-project/hadoop-hdfs/src/test/java/org/apache/hadoop/hdfs/TestFileStatusWithECschema.java
+@@ -0,0 +1,65 @@
++package org.apache.hadoop.hdfs;
++
++import static org.junit.Assert.assertNotNull;
++import static org.junit.Assert.assertNull;
++import static org.junit.Assert.assertTrue;
++
++import java.io.IOException;
++
++import org.apache.hadoop.conf.Configuration;
++import org.apache.hadoop.fs.Path;
++import org.apache.hadoop.fs.permission.FsPermission;
++import org.apache.hadoop.hdfs.server.namenode.ErasureCodingSchemaManager;
++import org.apache.hadoop.io.erasurecode.ECSchema;
++import org.junit.After;
++import org.junit.Before;
++import org.junit.Test;
++
++public class TestFileStatusWithECschema {
++  private MiniDFSCluster cluster;
++  private DistributedFileSystem fs;
++  private DFSClient client;
++
++  @Before
++  public void before() throws IOException {
++    cluster =
++        new MiniDFSCluster.Builder(new Configuration()).numDataNodes(1).build();
++    cluster.waitActive();
++    fs = cluster.getFileSystem();
++    client = fs.getClient();
++  }
++
++  @After
++  public void after() {
++    if (cluster != null) {
++      cluster.shutdown();
++    }
++  }
++
++  @Test
++  public void testFileStatusWithECschema() throws Exception {
++    // test directory not in EC zone
++    final Path dir = new Path("/foo");
++    assertTrue(fs.mkdir(dir, FsPermission.getDirDefault()));
++    assertNull(client.getFileInfo(dir.toString()).getECSchema());
++    // test file not in EC zone
++    final Path file = new Path(dir, "foo");
++    fs.create(file).close();
++    assertNull(client.getFileInfo(file.toString()).getECSchema());
++    fs.delete(file, true);
++
++    final ECSchema schema1 = ErasureCodingSchemaManager.getSystemDefaultSchema();
++    // create EC zone on dir
++    fs.createErasureCodingZone(dir, schema1, 0);
++    final ECSchema schame2 = client.getFileInfo(dir.toUri().getPath()).getECSchema();
++    assertNotNull(schame2);
++    assertTrue(schema1.equals(schame2));
++
++    // test file in EC zone
++    fs.create(file).close();
++    final ECSchema schame3 =
++        fs.getClient().getFileInfo(file.toUri().getPath()).getECSchema();
++    assertNotNull(schame3);
++    assertTrue(schema1.equals(schame3));
++  }
++}
+diff --git a/hadoop-hdfs-project/hadoop-hdfs/src/test/java/org/apache/hadoop/hdfs/TestLease.java b/hadoop-hdfs-project/hadoop-hdfs/src/test/java/org/apache/hadoop/hdfs/TestLease.java
+index 985f43e..d0cd335 100644
+--- a/hadoop-hdfs-project/hadoop-hdfs/src/test/java/org/apache/hadoop/hdfs/TestLease.java
++++ b/hadoop-hdfs-project/hadoop-hdfs/src/test/java/org/apache/hadoop/hdfs/TestLease.java
+@@ -354,12 +354,12 @@ public void testFactory() throws Exception {
+     Mockito.doReturn(
+         new HdfsFileStatus(0, false, 1, 1024, 0, 0, new FsPermission(
+             (short) 777), "owner", "group", new byte[0], new byte[0],
+-            1010, 0, null, (byte) 0)).when(mcp).getFileInfo(anyString());
++            1010, 0, null, (byte) 0, null, 0)).when(mcp).getFileInfo(anyString());
+     Mockito
+         .doReturn(
+             new HdfsFileStatus(0, false, 1, 1024, 0, 0, new FsPermission(
+                 (short) 777), "owner", "group", new byte[0], new byte[0],
+-                1010, 0, null, (byte) 0))
++                1010, 0, null, (byte) 0, null, 0))
+         .when(mcp)
+         .create(anyString(), (FsPermission) anyObject(), anyString(),
+             (EnumSetWritable<CreateFlag>) anyObject(), anyBoolean(),
+diff --git a/hadoop-hdfs-project/hadoop-hdfs/src/test/java/org/apache/hadoop/hdfs/server/namenode/NameNodeAdapter.java b/hadoop-hdfs-project/hadoop-hdfs/src/test/java/org/apache/hadoop/hdfs/server/namenode/NameNodeAdapter.java
+index b314584..a2cb434 100644
+--- a/hadoop-hdfs-project/hadoop-hdfs/src/test/java/org/apache/hadoop/hdfs/server/namenode/NameNodeAdapter.java
++++ b/hadoop-hdfs-project/hadoop-hdfs/src/test/java/org/apache/hadoop/hdfs/server/namenode/NameNodeAdapter.java
+@@ -71,8 +71,13 @@ public static LocatedBlocks getBlockLocations(NameNode namenode,
+   public static HdfsFileStatus getFileInfo(NameNode namenode, String src,
+       boolean resolveLink) throws AccessControlException, UnresolvedLinkException,
+         StandbyException, IOException {
+-    return FSDirStatAndListingOp.getFileInfo(namenode.getNamesystem()
+-            .getFSDirectory(), src, resolveLink);
++    namenode.getNamesystem().readLock();
++    try {
++      return FSDirStatAndListingOp.getFileInfo(namenode.getNamesystem()
++          .getFSDirectory(), src, resolveLink);
++    } finally {
++      namenode.getNamesystem().readUnlock();
++    }
+   }
+   
+   public static boolean mkdirs(NameNode namenode, String src,
+diff --git a/hadoop-hdfs-project/hadoop-hdfs/src/test/java/org/apache/hadoop/hdfs/server/namenode/TestFsck.java b/hadoop-hdfs-project/hadoop-hdfs/src/test/java/org/apache/hadoop/hdfs/server/namenode/TestFsck.java
+index 8818f17..dca37d9 100644
+--- a/hadoop-hdfs-project/hadoop-hdfs/src/test/java/org/apache/hadoop/hdfs/server/namenode/TestFsck.java
++++ b/hadoop-hdfs-project/hadoop-hdfs/src/test/java/org/apache/hadoop/hdfs/server/namenode/TestFsck.java
+@@ -1198,7 +1198,7 @@ public void testFsckFileNotFound() throws Exception {
+ 
+     HdfsFileStatus file = new HdfsFileStatus(length, isDir, blockReplication,
+         blockSize, modTime, accessTime, perms, owner, group, symlink,
+-        path, fileId, numChildren, null, storagePolicy);
++        path, fileId, numChildren, null, storagePolicy, null, 0);
+     Result res = new Result(conf);
+ 
+     try {
+diff --git a/hadoop-hdfs-project/hadoop-hdfs/src/test/java/org/apache/hadoop/hdfs/web/TestJsonUtil.java b/hadoop-hdfs-project/hadoop-hdfs/src/test/java/org/apache/hadoop/hdfs/web/TestJsonUtil.java
+index 391f190..303d063 100644
+--- a/hadoop-hdfs-project/hadoop-hdfs/src/test/java/org/apache/hadoop/hdfs/web/TestJsonUtil.java
++++ b/hadoop-hdfs-project/hadoop-hdfs/src/test/java/org/apache/hadoop/hdfs/web/TestJsonUtil.java
+@@ -65,7 +65,7 @@ public void testHdfsFileStatus() throws IOException {
+     final HdfsFileStatus status = new HdfsFileStatus(1001L, false, 3, 1L << 26,
+         now, now + 10, new FsPermission((short) 0644), "user", "group",
+         DFSUtil.string2Bytes("bar"), DFSUtil.string2Bytes("foo"),
+-        HdfsConstants.GRANDFATHER_INODE_ID, 0, null, (byte) 0);
++        HdfsConstants.GRANDFATHER_INODE_ID, 0, null, (byte) 0, null, 0);
+     final FileStatus fstatus = toFileStatus(status, parent);
+     System.out.println("status  = " + status);
+     System.out.println("fstatus = " + fstatus);
+diff --git a/hadoop-hdfs-project/hadoop-hdfs/src/test/resources/testErasureCodingConf.xml b/hadoop-hdfs-project/hadoop-hdfs/src/test/resources/testErasureCodingConf.xml
+new file mode 100644
+index 0000000..70020d5
+--- /dev/null
++++ b/hadoop-hdfs-project/hadoop-hdfs/src/test/resources/testErasureCodingConf.xml
+@@ -0,0 +1,377 @@
++<?xml version="1.0" encoding="UTF-8"?>
++<?xml-stylesheet type="text/xsl" href="testConf.xsl"?>
++
++<!--
++   Licensed to the Apache Software Foundation (ASF) under one or more
++   contributor license agreements.  See the NOTICE file distributed with
++   this work for additional information regarding copyright ownership.
++   The ASF licenses this file to You under the Apache License, Version 2.0
++   (the "License"); you may not use this file except in compliance with
++   the License.  You may obtain a copy of the License at
++
++       http://www.apache.org/licenses/LICENSE-2.0
++
++   Unless required by applicable law or agreed to in writing, software
++   distributed under the License is distributed on an "AS IS" BASIS,
++   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++   See the License for the specific language governing permissions and
++   limitations under the License.
++-->
++
++<configuration>
++  <!-- Normal mode is test. To run just the commands and dump the output
++       to the log, set it to nocompare -->
++  <mode>test</mode>
++
++  <!--  Comparator types:
++           ExactComparator
++           SubstringComparator
++           RegexpComparator
++           TokenComparator
++           -->
++  <tests>
++
++  <!-- Test help options -->
++    <test>
++      <description>help: help for erasure coding command</description>
++      <test-commands>
++        <ec-admin-command>-help</ec-admin-command>
++      </test-commands>
++      <cleanup-commands>
++      </cleanup-commands>
++      <comparators>
++        <comparator>
++          <type>SubstringComparator</type>
++          <expected-output>Usage: hdfs erasurecode [generic options]</expected-output>
++        </comparator>
++      </comparators>
++    </test>
++
++    <test>
++      <description>help: createZone command</description>
++      <test-commands>
++        <ec-admin-command>-fs NAMENODE -help createZone</ec-admin-command>
++      </test-commands>
++      <cleanup-commands>
++      </cleanup-commands>
++      <comparators>
++        <comparator>
++          <type>RegexpComparator</type>
++          <expected-output>^[ \t]*Create a zone to encode files using a specified schema( )*</expected-output>
++        </comparator>
++        <comparator>
++          <type>RegexpComparator</type>
++          <expected-output>^-createZone \[-s &lt;schemaName&gt;\] \[-c &lt;cellSize&gt;\] &lt;path&gt;(.)*</expected-output>
++        </comparator>
++      </comparators>
++    </test>
++
++    <test>
++      <description>help: getZone command</description>
++      <test-commands>
++        <ec-admin-command>-fs NAMENODE -help getZone</ec-admin-command>
++      </test-commands>
++      <cleanup-commands>
++      </cleanup-commands>
++      <comparators>
++        <comparator>
++          <type>SubstringComparator</type>
++          <expected-output>Get information about the EC zone at specified path</expected-output>
++        </comparator>
++        <comparator>
++          <type>RegexpComparator</type>
++          <expected-output>^-getZone &lt;path&gt;(.)*</expected-output>
++        </comparator>
++      </comparators>
++    </test>
++
++    <test>
++      <description>help: listSchemas command</description>
++      <test-commands>
++        <ec-admin-command>-fs NAMENODE -help listSchemas</ec-admin-command>
++      </test-commands>
++      <cleanup-commands>
++      </cleanup-commands>
++      <comparators>
++        <comparator>
++          <type>SubstringComparator</type>
++          <expected-output>Get the list of ECSchemas supported</expected-output>
++        </comparator>
++        <comparator>
++          <type>RegexpComparator</type>
++          <expected-output>^-listSchemas (.)*</expected-output>
++        </comparator>
++      </comparators>
++    </test>
++
++  <!-- Test erasure code commands -->
++    <test>
++      <description>createZone : create a zone to encode files</description>
++      <test-commands>
++        <command>-fs NAMENODE -mkdir /eczone</command>
++        <ec-admin-command>-fs NAMENODE -createZone -s RS-6-3 /eczone</ec-admin-command>
++      </test-commands>
++      <cleanup-commands>
++        <command>-fs NAMENODE -rmdir /eczone</command>
++      </cleanup-commands>
++      <comparators>
++        <comparator>
++          <type>SubstringComparator</type>
++          <expected-output>EC Zone created successfully at NAMENODE/eczone</expected-output>
++        </comparator>
++      </comparators>
++    </test>
++
++    <test>
++      <description>createZone : create a zone twice</description>
++      <test-commands>
++        <command>-fs NAMENODE -mkdir /eczone</command>
++        <ec-admin-command>-fs NAMENODE -createZone /eczone</ec-admin-command>
++        <ec-admin-command>-fs NAMENODE -createZone /eczone</ec-admin-command>
++      </test-commands>
++      <cleanup-commands>
++        <command>-fs NAMENODE -rmdir /eczone</command>
++      </cleanup-commands>
++      <comparators>
++        <comparator>
++          <type>SubstringComparator</type>
++          <expected-output>Directory /eczone is already in an erasure coding zone</expected-output>
++        </comparator>
++      </comparators>
++    </test>
++
++    <test>
++      <description>createZone : default schema</description>
++      <test-commands>
++        <command>-fs NAMENODE -mkdir /eczone</command>
++        <ec-admin-command>-fs NAMENODE -createZone /eczone</ec-admin-command>
++        <ec-admin-command>-fs NAMENODE -getZone /eczone</ec-admin-command>
++      </test-commands>
++      <cleanup-commands>
++        <command>-fs NAMENODE -rmdir /eczone</command>
++      </cleanup-commands>
++      <comparators>
++        <comparator>
++          <type>SubstringComparator</type>
++          <expected-output>Dir: /eczone, Schema: ECSchema=[Name=RS-6-3</expected-output>
++        </comparator>
++      </comparators>
++    </test>
++
++    <test>
++      <description>getZone : get information about the EC zone at specified path not in zone</description>
++      <test-commands>
++        <command>-fs NAMENODE -mkdir /noec</command>
++        <ec-admin-command>-fs NAMENODE -getZone /noec</ec-admin-command>
++      </test-commands>
++      <cleanup-commands>
++        <command>-fs NAMENODE -rmdir /noec</command>
++      </cleanup-commands>
++      <comparators>
++        <comparator>
++          <type>SubstringComparator</type>
++          <expected-output>Path NAMENODE/noec is not in EC zone</expected-output>
++        </comparator>
++      </comparators>
++    </test>
++
++    <test>
++      <description>getZone : get information about the EC zone at specified path</description>
++      <test-commands>
++        <command>-fs NAMENODE -mkdir /eczone</command>
++        <ec-admin-command>-fs NAMENODE -createZone -s RS-6-3 /eczone</ec-admin-command>
++        <ec-admin-command>-fs NAMENODE -getZone /eczone</ec-admin-command>
++      </test-commands>
++      <cleanup-commands>
++        <command>-fs NAMENODE -rmdir /eczone</command>
++      </cleanup-commands>
++      <comparators>
++        <comparator>
++          <type>SubstringComparator</type>
++          <expected-output>Dir: /eczone, Schema: ECSchema=[Name=RS-6-3</expected-output>
++        </comparator>
++      </comparators>
++    </test>
++
++    <test>
++      <description>getZone : get EC zone at specified file path</description>
++      <test-commands>
++        <command>-fs NAMENODE -mkdir /eczone</command>
++        <ec-admin-command>-fs NAMENODE -createZone -s RS-6-3 /eczone</ec-admin-command>
++        <command>-fs NAMENODE -touchz /eczone/ecfile</command>
++        <ec-admin-command>-fs NAMENODE -getZone /eczone/ecfile</ec-admin-command>
++      </test-commands>
++      <cleanup-commands>
++        <command>-fs NAMENODE -rm /eczone/ecfile</command>
++        <command>-fs NAMENODE -rmdir /eczone</command>
++      </cleanup-commands>
++      <comparators>
++        <comparator>
++          <type>SubstringComparator</type>
++          <expected-output>Dir: /eczone, Schema: ECSchema=[Name=RS-6-3</expected-output>
++        </comparator>
++      </comparators>
++    </test>
++
++    <test>
++      <description>listSchemas : get the list of ECSchemas supported</description>
++      <test-commands>
++        <ec-admin-command>-fs NAMENODE -listSchemas</ec-admin-command>
++      </test-commands>
++      <cleanup-commands>
++      </cleanup-commands>
++      <comparators>
++        <comparator>
++          <type>SubstringComparator</type>
++          <expected-output>RS-6-3</expected-output>
++        </comparator>
++      </comparators>
++    </test>
++
++<!-- Test illegal parameters -->
++    <test>
++      <description>createZone : illegal parameters - path is missing</description>
++      <test-commands>
++        <command>-fs NAMENODE -mkdir /eczone</command>
++        <ec-admin-command>-fs NAMENODE -createZone</ec-admin-command>
++      </test-commands>
++      <cleanup-commands>
++        <command>-fs NAMENODE -rmdir /eczone</command>
++      </cleanup-commands>
++      <comparators>
++        <comparator>
++          <type>RegexpComparator</type>
++          <expected-output>^-createZone: &lt;path&gt; is missing(.)*</expected-output>
++        </comparator>
++      </comparators>
++    </test>
++
++    <test>
++      <description>createZone : illegal parameters - schema name is missing</description>
++      <test-commands>
++        <command>-fs NAMENODE -mkdir /eczone</command>
++        <ec-admin-command>-fs NAMENODE -createZone -s</ec-admin-command>
++      </test-commands>
++      <cleanup-commands>
++        <command>-fs NAMENODE -rmdir /eczone</command>
++      </cleanup-commands>
++      <comparators>
++        <comparator>
++          <type>RegexpComparator</type>
++          <expected-output>^-createZone: option -s requires 1 argument(.)*</expected-output>
++        </comparator>
++      </comparators>
++    </test>
++
++    <test>
++      <description>createZone : illegal parameters - too many arguments</description>
++      <test-commands>
++        <command>-fs NAMENODE -mkdir /eczone</command>
++        <ec-admin-command>-fs NAMENODE -createZone /eczone1 /eczone2</ec-admin-command>
++      </test-commands>
++      <cleanup-commands>
++        <command>-fs NAMENODE -rmdir /eczone</command>
++      </cleanup-commands>
++      <comparators>
++        <comparator>
++          <type>SubstringComparator</type>
++          <expected-output>-createZone: Too many arguments</expected-output>
++        </comparator>
++      </comparators>
++    </test>
++
++    <test>
++      <description>createZone : illegal parameters - invalidschema</description>
++      <test-commands>
++        <command>-fs NAMENODE -mkdir /eczone</command>
++        <ec-admin-command>-fs NAMENODE -createZone -s invalidschema /eczone</ec-admin-command>
++      </test-commands>
++      <cleanup-commands>
++        <command>-fs NAMENODE -rmdir /eczone</command>
++      </cleanup-commands>
++      <comparators>
++        <comparator>
++          <type>SubstringComparator</type>
++          <expected-output>Schema 'invalidschema' does not match any of the supported schemas. Please select any one of [RS-6-3]</expected-output>
++        </comparator>
++      </comparators>
++    </test>
++
++    <test>
++      <description>createZone : illegal parameters - no such file</description>
++      <test-commands>
++        <ec-admin-command>-fs NAMENODE -createZone /eczone</ec-admin-command>
++      </test-commands>
++      <cleanup-commands>
++      </cleanup-commands>
++      <comparators>
++        <comparator>
++          <type>RegexpComparator</type>
++          <expected-output>^createZone: `/eczone': No such file or directory(.)*</expected-output>
++        </comparator>
++      </comparators>
++    </test>
++
++    <test>
++      <description>getZone : illegal parameters - path is missing</description>
++      <test-commands>
++        <ec-admin-command>-fs NAMENODE -getZone </ec-admin-command>
++      </test-commands>
++      <cleanup-commands>
++      </cleanup-commands>
++      <comparators>
++        <comparator>
++          <type>RegexpComparator</type>
++          <expected-output>^-getZone: &lt;path&gt; is missing(.)*</expected-output>
++        </comparator>
++      </comparators>
++    </test>
++
++    <test>
++      <description>getZone : illegal parameters - too many arguments</description>
++      <test-commands>
++        <ec-admin-command>-fs NAMENODE -getZone /eczone /eczone</ec-admin-command>
++      </test-commands>
++      <cleanup-commands>
++        <command>-fs NAMENODE -rm /eczone</command>
++      </cleanup-commands>
++      <comparators>
++        <comparator>
++          <type>SubstringComparator</type>
++          <expected-output>-getZone: Too many arguments</expected-output>
++        </comparator>
++      </comparators>
++    </test>
++
++    <test>
++      <description>getZone : illegal parameters - no such file</description>
++      <test-commands>
++        <ec-admin-command>-fs NAMENODE -getZone /eczone</ec-admin-command>
++      </test-commands>
++      <cleanup-commands>
++      </cleanup-commands>
++      <comparators>
++        <comparator>
++          <type>RegexpComparator</type>
++          <expected-output>^getZone: `/eczone': No such file or directory(.)*</expected-output>
++        </comparator>
++      </comparators>
++    </test>
++
++    <test>
++      <description>listSchemas : illegal parameters - too many parameters</description>
++      <test-commands>
++        <ec-admin-command>-fs NAMENODE -listSchemas /eczone</ec-admin-command>
++      </test-commands>
++      <cleanup-commands>
++      </cleanup-commands>
++      <comparators>
++        <comparator>
++          <type>SubstringComparator</type>
++          <expected-output>-listSchemas: Too many parameters</expected-output>
++        </comparator>
++      </comparators>
++    </test>
++
++  </tests>
++</configuration>

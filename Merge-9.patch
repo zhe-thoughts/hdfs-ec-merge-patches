@@ -1297,3 +1297,33 @@ index 0000000..34e70ee
 +    }
 +  }
 +}
+diff --git a/hadoop-hdfs-project/hadoop-hdfs/src/main/resources/hdfs-default.xml b/hadoop-hdfs-project/hadoop-hdfs/src/main/resources/hdfs-default.xml
+index 8cb7d5f..74d37a7 100644
+--- a/hadoop-hdfs-project/hadoop-hdfs/src/main/resources/hdfs-default.xml
++++ b/hadoop-hdfs-project/hadoop-hdfs/src/main/resources/hdfs-default.xml
+@@ -2412,4 +2412,25 @@
+   </description>
+ </property>
+ 
++<property>
++  <name>dfs.datanode.stripedread.threshold.millis</name>
++  <value>5000</value>
++  <description>datanode striped read threshold in millisecond.
++  </description>
++</property>
++
++<property>
++  <name>dfs.datanode.stripedread.threads</name>
++  <value>20</value>
++  <description>datanode striped read thread pool size.
++  </description>
++</property>
++
++<property>
++  <name>dfs.datanode.stripedread.buffer.size</name>
++  <value>262144</value>
++  <description>datanode striped read buffer size.
++  </description>
++</property>
++
+ </configuration>
