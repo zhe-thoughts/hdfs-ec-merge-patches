@@ -1,12 +1,12 @@
 diff --git a/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/DFSConfigKeys.java b/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/DFSConfigKeys.java
-index 0e569f0..857423d 100644
+index 0e569f0..2a1f0c2 100644
 --- a/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/DFSConfigKeys.java
 +++ b/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/DFSConfigKeys.java
 @@ -24,6 +24,7 @@
  import org.apache.hadoop.fs.CommonConfigurationKeys;
  import org.apache.hadoop.hdfs.client.HdfsClientConfigKeys;
  import org.apache.hadoop.hdfs.server.blockmanagement.BlockPlacementPolicyDefault;
-+import org.apache.hadoop.hdfs.server.blockmanagement.BlockPlacementPolicyRackFaultTolarent;
++import org.apache.hadoop.hdfs.server.blockmanagement.BlockPlacementPolicyRackFaultTolerant;
  import org.apache.hadoop.hdfs.server.datanode.fsdataset.impl.RamDiskReplicaLruTracker;
  import org.apache.hadoop.http.HttpConfig;
  
@@ -15,10 +15,33 @@ index 0e569f0..857423d 100644
    public static final String  DFS_REPLICATION_MAX_KEY = "dfs.replication.max";
    public static final int     DFS_REPLICATION_MAX_DEFAULT = 512;
 +  public static final String DFS_BLOCK_PLACEMENT_EC_CLASSNAME_KEY = "dfs.block.placement.ec.classname";
-+  public static final Class<BlockPlacementPolicyRackFaultTolarent> DFS_BLOCK_PLACEMENT_EC_CLASSNAME_DEFAULT = BlockPlacementPolicyRackFaultTolarent.class;
++  public static final Class<BlockPlacementPolicyRackFaultTolerant> DFS_BLOCK_PLACEMENT_EC_CLASSNAME_DEFAULT = BlockPlacementPolicyRackFaultTolerant.class;
  
    public static final String  DFS_DF_INTERVAL_KEY = "dfs.df.interval";
    public static final int     DFS_DF_INTERVAL_DEFAULT = 60000;
+diff --git a/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/balancer/Balancer.java b/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/balancer/Balancer.java
+index 8b7d802..402c879 100644
+--- a/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/balancer/Balancer.java
++++ b/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/balancer/Balancer.java
+@@ -47,6 +47,7 @@
+ import org.apache.hadoop.hdfs.server.balancer.Dispatcher.Source;
+ import org.apache.hadoop.hdfs.server.balancer.Dispatcher.Task;
+ import org.apache.hadoop.hdfs.server.balancer.Dispatcher.Util;
++import org.apache.hadoop.hdfs.server.blockmanagement.BlockPlacementPolicies;
+ import org.apache.hadoop.hdfs.server.blockmanagement.BlockPlacementPolicy;
+ import org.apache.hadoop.hdfs.server.blockmanagement.BlockPlacementPolicyDefault;
+ import org.apache.hadoop.hdfs.server.namenode.UnsupportedActionException;
+@@ -206,7 +207,9 @@
+    */
+   private static void checkReplicationPolicyCompatibility(Configuration conf
+       ) throws UnsupportedActionException {
+-    if (!(BlockPlacementPolicy.getInstance(conf, null, null, null) instanceof 
++    BlockPlacementPolicies placementPolicies =
++        new BlockPlacementPolicies(conf, null, null, null);
++    if (!(placementPolicies.getPolicy(false) instanceof
+         BlockPlacementPolicyDefault)) {
+       throw new UnsupportedActionException(
+           "Balancer without BlockPlacementPolicyDefault");
 diff --git a/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/blockmanagement/BlockManager.java b/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/blockmanagement/BlockManager.java
 index 170a357..9781e09 100644
 --- a/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/blockmanagement/BlockManager.java
@@ -271,6 +294,20 @@ index 9696179..86aaf79 100644
    /**
     * Adjust rackmap, moreThanOne, and exactlyOne after removing replica on cur.
     *
+diff --git a/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/namenode/FSDirWriteFileOp.java b/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/namenode/FSDirWriteFileOp.java
+index 4830d5d..eab57dd 100644
+--- a/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/namenode/FSDirWriteFileOp.java
++++ b/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/namenode/FSDirWriteFileOp.java
+@@ -280,7 +280,8 @@ static LocatedBlock storeAllocatedBlock(FSNamesystem fsn, String src,
+     // choose targets for the new block to be allocated.
+     return bm.chooseTarget4NewBlock(src, r.replication, clientNode,
+                                     excludedNodesSet, r.blockSize,
+-                                    favoredNodesList, r.storagePolicyID);
++                                    favoredNodesList, r.storagePolicyID,
++                                    false);
+   }
+ 
+   /**
 diff --git a/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/namenode/FSNamesystem.java b/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/namenode/FSNamesystem.java
 index 545845e..cd308c8 100644
 --- a/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/namenode/FSNamesystem.java
@@ -332,3 +369,16 @@ index ab179b4..cb6998b 100644
            .verifyBlockPlacement(path, lBlk, targetFileReplication);
        if (!blockPlacementStatus.isPlacementPolicySatisfied()) {
          res.numMisReplicatedBlocks++;
+diff --git a/hadoop-hdfs-project/hadoop-hdfs/src/test/java/org/apache/hadoop/hdfs/server/namenode/TestDeadDatanode.java b/hadoop-hdfs-project/hadoop-hdfs/src/test/java/org/apache/hadoop/hdfs/server/namenode/TestDeadDatanode.java
+index c5262d4..0c4c70b 100644
+--- a/hadoop-hdfs-project/hadoop-hdfs/src/test/java/org/apache/hadoop/hdfs/server/namenode/TestDeadDatanode.java
++++ b/hadoop-hdfs-project/hadoop-hdfs/src/test/java/org/apache/hadoop/hdfs/server/namenode/TestDeadDatanode.java
+@@ -162,7 +162,7 @@ public void testDeadNodeAsBlockTarget() throws Exception {
+     // choose the targets, but local node should not get selected as this is not
+     // part of the cluster anymore
+     DatanodeStorageInfo[] results = bm.chooseTarget4NewBlock("/hello", 3,
+-        clientNode, new HashSet<Node>(), 256 * 1024 * 1024L, null, (byte) 7);
++        clientNode, new HashSet<Node>(), 256 * 1024 * 1024L, null, (byte) 7, false);
+     for (DatanodeStorageInfo datanodeStorageInfo : results) {
+       assertFalse("Dead node should not be choosen", datanodeStorageInfo
+           .getDatanodeDescriptor().equals(clientNode));

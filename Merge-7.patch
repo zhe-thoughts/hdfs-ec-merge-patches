@@ -1,784 +1,857 @@
-diff --git a/hadoop-hdfs-project/hadoop-hdfs-client/src/main/java/org/apache/hadoop/hdfs/client/HdfsClientConfigKeys.java b/hadoop-hdfs-project/hadoop-hdfs-client/src/main/java/org/apache/hadoop/hdfs/client/HdfsClientConfigKeys.java
-index e6d579b..53cf748 100644
---- a/hadoop-hdfs-project/hadoop-hdfs-client/src/main/java/org/apache/hadoop/hdfs/client/HdfsClientConfigKeys.java
-+++ b/hadoop-hdfs-project/hadoop-hdfs-client/src/main/java/org/apache/hadoop/hdfs/client/HdfsClientConfigKeys.java
-@@ -178,6 +178,18 @@
-     int     THREADPOOL_SIZE_DEFAULT = 0;
-   }
- 
-+  /** dfs.client.read.striped configuration properties */
-+  interface StripedRead {
-+    String PREFIX = Read.PREFIX + "striped.";
-+
-+    String  THREADPOOL_SIZE_KEY = PREFIX + "threadpool.size";
-+    /**
-+     * With default 6+3 schema, each normal read could span 6 DNs. So this
-+     * default value accommodates 3 read streams
-+     */
-+    int     THREADPOOL_SIZE_DEFAULT = 18;
-+  }
-+
-   /** dfs.http.client configuration properties */
-   interface HttpClient {
-     String  PREFIX = "dfs.http.client.";
-diff --git a/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/DFSClient.java b/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/DFSClient.java
-index 2913c9b..cf35a0e 100644
---- a/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/DFSClient.java
-+++ b/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/DFSClient.java
-@@ -239,6 +239,7 @@
-   private static final DFSHedgedReadMetrics HEDGED_READ_METRIC =
-       new DFSHedgedReadMetrics();
-   private static ThreadPoolExecutor HEDGED_READ_THREAD_POOL;
-+  private static volatile ThreadPoolExecutor STRIPED_READ_THREAD_POOL;
-   private final Sampler<?> traceSampler;
-   private final int smallBufferSize;
- 
-@@ -376,8 +377,12 @@ public DFSClient(URI nameNodeUri, ClientProtocol rpcNamenode,
-         dfsClientConf);
- 
-     if (dfsClientConf.getHedgedReadThreadpoolSize() > 0) {
--      this.initThreadsNumForHedgedReads(dfsClientConf.getHedgedReadThreadpoolSize());
-+      this.initThreadsNumForHedgedReads(dfsClientConf.
-+          getHedgedReadThreadpoolSize());
-     }
-+
-+    this.initThreadsNumForStripedReads(dfsClientConf.
-+        getStripedReadThreadpoolSize());
-     this.saslClient = new SaslDataTransferClient(
-       conf, DataTransferSaslUtil.getSaslPropertiesResolver(conf),
-       TrustedChannelResolver.getInstance(conf), nnFallbackToSimpleAuth);
-@@ -1183,7 +1188,17 @@ public DFSInputStream open(String src, int buffersize, boolean verifyChecksum)
-     //    Get block info from namenode
-     TraceScope scope = getPathTraceScope("newDFSInputStream", src);
-     try {
--      return new DFSInputStream(this, src, verifyChecksum, null);
-+      LocatedBlocks locatedBlocks = getLocatedBlocks(src, 0);
-+      if (locatedBlocks != null) {
-+        ECSchema schema = locatedBlocks.getECSchema();
-+        if (schema != null) {
-+          return new DFSStripedInputStream(this, src, verifyChecksum, schema,
-+              locatedBlocks.getStripeCellSize(), locatedBlocks);
-+        }
-+        return new DFSInputStream(this, src, verifyChecksum, locatedBlocks);
-+      } else {
-+        throw new IOException("Cannot open filename " + src);
-+      }
-     } finally {
-       scope.close();
-     }
-@@ -1315,7 +1330,7 @@ public DFSOutputStream create(String src,
-                              Progressable progress,
-                              int buffersize,
-                              ChecksumOpt checksumOpt) throws IOException {
--    return create(src, permission, flag, createParent, replication, blockSize, 
-+    return create(src, permission, flag, createParent, replication, blockSize,
-         progress, buffersize, checksumOpt, null);
-   }
- 
-@@ -3177,10 +3192,51 @@ public void rejectedExecution(Runnable runnable,
-     }
-   }
- 
-+  /**
-+   * Create thread pool for parallel reading in striped layout,
-+   * STRIPED_READ_THREAD_POOL, if it does not already exist.
-+   * @param num Number of threads for striped reads thread pool.
-+   */
-+  private void initThreadsNumForStripedReads(int num) {
-+    assert num > 0;
-+    if (STRIPED_READ_THREAD_POOL != null) {
-+      return;
-+    }
-+    synchronized (DFSClient.class) {
-+      if (STRIPED_READ_THREAD_POOL == null) {
-+        STRIPED_READ_THREAD_POOL = new ThreadPoolExecutor(1, num, 60,
-+            TimeUnit.SECONDS, new SynchronousQueue<Runnable>(),
-+            new Daemon.DaemonFactory() {
-+          private final AtomicInteger threadIndex = new AtomicInteger(0);
-+
-+          @Override
-+          public Thread newThread(Runnable r) {
-+            Thread t = super.newThread(r);
-+            t.setName("stripedRead-" + threadIndex.getAndIncrement());
-+            return t;
-+          }
-+        }, new ThreadPoolExecutor.CallerRunsPolicy() {
-+          @Override
-+          public void rejectedExecution(Runnable runnable, ThreadPoolExecutor e) {
-+            LOG.info("Execution for striped reading rejected, "
-+                + "Executing in current thread");
-+            // will run in the current thread
-+            super.rejectedExecution(runnable, e);
-+          }
-+        });
-+        STRIPED_READ_THREAD_POOL.allowCoreThreadTimeOut(true);
-+      }
-+    }
-+  }
-+
-   ThreadPoolExecutor getHedgedReadsThreadPool() {
-     return HEDGED_READ_THREAD_POOL;
-   }
- 
-+  ThreadPoolExecutor getStripedReadsThreadPool() {
-+    return STRIPED_READ_THREAD_POOL;
-+  }
-+
-   boolean isHedgedReadsEnabled() {
-     return (HEDGED_READ_THREAD_POOL != null) &&
-       HEDGED_READ_THREAD_POOL.getMaximumPoolSize() > 0;
-diff --git a/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/DFSConfigKeys.java b/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/DFSConfigKeys.java
-index 857423d..7bbc0ab 100644
---- a/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/DFSConfigKeys.java
-+++ b/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/DFSConfigKeys.java
-@@ -365,6 +365,12 @@
-   public static final int     DFS_DATANODE_DIRECTORYSCAN_INTERVAL_DEFAULT = 21600;
-   public static final String  DFS_DATANODE_DIRECTORYSCAN_THREADS_KEY = "dfs.datanode.directoryscan.threads";
-   public static final int     DFS_DATANODE_DIRECTORYSCAN_THREADS_DEFAULT = 1;
-+  public static final String  DFS_DATANODE_STRIPED_READ_THREADS_KEY = "dfs.datanode.stripedread.threads";
-+  public static final int     DFS_DATANODE_STRIPED_READ_THREADS_DEFAULT = 20;
-+  public static final String  DFS_DATANODE_STRIPED_READ_BUFFER_SIZE_KEY = "dfs.datanode.stripedread.buffer.size";
-+  public static final int     DFS_DATANODE_STRIPED_READ_BUFFER_SIZE_DEFAULT = 64 * 1024;
-+  public static final String  DFS_DATANODE_STRIPED_READ_THRESHOLD_MILLIS_KEY = "dfs.datanode.stripedread.threshold.millis";
-+  public static final int     DFS_DATANODE_STRIPED_READ_THRESHOLD_MILLIS_DEFAULT = 5000; //5s
-   public static final String  DFS_DATANODE_DNS_INTERFACE_KEY = "dfs.datanode.dns.interface";
-   public static final String  DFS_DATANODE_DNS_INTERFACE_DEFAULT = "default";
-   public static final String  DFS_DATANODE_DNS_NAMESERVER_KEY = "dfs.datanode.dns.nameserver";
-@@ -675,7 +681,13 @@
-       "dfs.namenode.reject-unresolved-dn-topology-mapping";
-   public static final boolean DFS_REJECT_UNRESOLVED_DN_TOPOLOGY_MAPPING_DEFAULT =
-       false;
--  
-+
-+  public static final String DFS_CLIENT_STRIPED_READ_THREADPOOL_MAX_SIZE =
-+      "dfs.client.striped.read.threadpool.size";
-+  // With default 3+2 schema, each normal read could span 3 DNs. So this
-+  // default value accommodates 6 read streams
-+  public static final int DFS_CLIENT_STRIPED_READ_THREADPOOL_MAX_DEFAULT_SIZE = 18;
-+
-   // Slow io warning log threshold settings for dfsclient and datanode.
-   public static final String DFS_DATANODE_SLOW_IO_WARNING_THRESHOLD_KEY =
-     "dfs.datanode.slow.io.warning.threshold.ms";
-diff --git a/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/DFSInputStream.java b/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/DFSInputStream.java
-index 7f3722f..5b10ffe 100644
---- a/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/DFSInputStream.java
-+++ b/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/DFSInputStream.java
-@@ -1485,7 +1485,7 @@ private int pread(long position, byte[] buffer, int offset, int length)
-       long targetStart = position - blk.getStartOffset();
-       long bytesToRead = Math.min(remaining, blk.getBlockSize() - targetStart);
-       try {
--        if (dfsClient.isHedgedReadsEnabled()) {
-+        if (dfsClient.isHedgedReadsEnabled() && !blk.isStriped()) {
-           hedgedFetchBlockByteRange(blk, targetStart,
-               targetStart + bytesToRead - 1, buffer, offset, corruptedBlockMap);
-         } else {
-@@ -1628,9 +1628,6 @@ private boolean seekToBlockSource(long targetPos)
-    */
-   @Override
-   public synchronized boolean seekToNewSource(long targetPos) throws IOException {
--    if (currentNode == null) {
--      return seekToBlockSource(targetPos);
--    }
-     boolean markedDead = deadNodes.containsKey(currentNode);
-     addToDeadNodes(currentNode);
-     DatanodeInfo oldNode = currentNode;
-diff --git a/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/DFSOutputStream.java b/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/DFSOutputStream.java
-index c16aef2..afe85fc 100755
---- a/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/DFSOutputStream.java
-+++ b/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/DFSOutputStream.java
-@@ -24,6 +24,8 @@
- import java.util.EnumSet;
- import java.util.concurrent.atomic.AtomicReference;
- 
-+import org.apache.commons.logging.Log;
-+import org.apache.commons.logging.LogFactory;
- import org.apache.hadoop.HadoopIllegalArgumentException;
- import org.apache.hadoop.classification.InterfaceAudience;
- import org.apache.hadoop.crypto.CryptoProtocolVersion;
-@@ -64,8 +66,6 @@
- import org.apache.htrace.Sampler;
- import org.apache.htrace.Trace;
- import org.apache.htrace.TraceScope;
--import org.slf4j.Logger;
--import org.slf4j.LoggerFactory;
- 
- import com.google.common.annotations.VisibleForTesting;
- import com.google.common.base.Preconditions;
-@@ -88,7 +88,8 @@
- @InterfaceAudience.Private
- public class DFSOutputStream extends FSOutputSummer
-     implements Syncable, CanSetDropBehind {
--  static final Logger LOG = LoggerFactory.getLogger(DFSOutputStream.class);
-+  static final Log LOG = LogFactory.getLog(DFSOutputStream.class);
-+
-   /**
-    * Number of times to retry creating a file when there are transient 
-    * errors (typically related to encryption zones and KeyProvider operations).
-@@ -110,7 +111,7 @@
-   protected final int bytesPerChecksum;
- 
-   protected DFSPacket currentPacket = null;
--  private DataStreamer streamer;
-+  protected DataStreamer streamer;
-   protected int packetSize = 0; // write packet size, not including the header.
-   protected int chunksPerPacket = 0;
-   protected long lastFlushOffset = 0; // offset when flush was invoked
-@@ -142,7 +143,7 @@ protected DFSPacket createPacket(int packetSize, int chunksPerPkt, long offsetIn
-   @Override
-   protected void checkClosed() throws IOException {
-     if (isClosed()) {
--      getStreamer().getLastException().throwException4Close();
-+      streamer.getLastException().throwException4Close();
-     }
-   }
- 
-@@ -151,10 +152,10 @@ protected void checkClosed() throws IOException {
-   //
-   @VisibleForTesting
-   public synchronized DatanodeInfo[] getPipeline() {
--    if (getStreamer().streamerClosed()) {
-+    if (streamer.streamerClosed()) {
+diff --git a/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/protocolPB/PBHelper.java b/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/protocolPB/PBHelper.java
+index ce06c30..7377d87 100644
+--- a/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/protocolPB/PBHelper.java
++++ b/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/protocolPB/PBHelper.java
+@@ -121,6 +121,7 @@
+ import org.apache.hadoop.hdfs.protocol.proto.DataTransferProtos.ShortCircuitShmSlotProto;
+ import org.apache.hadoop.hdfs.protocol.proto.DatanodeProtocolProtos.BalancerBandwidthCommandProto;
+ import org.apache.hadoop.hdfs.protocol.proto.DatanodeProtocolProtos.BlockCommandProto;
++import org.apache.hadoop.hdfs.protocol.proto.DatanodeProtocolProtos.BlockECRecoveryCommandProto;
+ import org.apache.hadoop.hdfs.protocol.proto.DatanodeProtocolProtos.BlockIdCommandProto;
+ import org.apache.hadoop.hdfs.protocol.proto.DatanodeProtocolProtos.BlockRecoveryCommandProto;
+ import org.apache.hadoop.hdfs.protocol.proto.DatanodeProtocolProtos.DatanodeCommandProto;
+@@ -134,6 +135,7 @@
+ import org.apache.hadoop.hdfs.protocol.proto.DatanodeProtocolProtos.BlockReportContextProto;
+ import org.apache.hadoop.hdfs.protocol.proto.ErasureCodingProtos;
+ import org.apache.hadoop.hdfs.protocol.proto.HdfsProtos;
++import org.apache.hadoop.hdfs.protocol.proto.ErasureCodingProtos.BlockECRecoveryInfoProto;
+ import org.apache.hadoop.hdfs.protocol.proto.ErasureCodingProtos.ErasureCodingZoneProto;
+ import org.apache.hadoop.hdfs.protocol.proto.HdfsProtos.ECSchemaOptionEntryProto;
+ import org.apache.hadoop.hdfs.protocol.proto.HdfsProtos.ECSchemaProto;
+@@ -202,6 +204,8 @@
+ import org.apache.hadoop.hdfs.server.namenode.CheckpointSignature;
+ import org.apache.hadoop.hdfs.server.protocol.BalancerBandwidthCommand;
+ import org.apache.hadoop.hdfs.server.protocol.BlockCommand;
++import org.apache.hadoop.hdfs.server.protocol.BlockECRecoveryCommand;
++import org.apache.hadoop.hdfs.server.protocol.BlockECRecoveryCommand.BlockECRecoveryInfo;
+ import org.apache.hadoop.hdfs.server.protocol.BlockIdCommand;
+ import org.apache.hadoop.hdfs.server.protocol.BlockRecoveryCommand;
+ import org.apache.hadoop.hdfs.server.protocol.BlockRecoveryCommand.RecoveringBlock;
+@@ -953,6 +957,8 @@ public static DatanodeCommand convert(DatanodeCommandProto proto) {
+       return REG_CMD;
+     case BlockIdCommand:
+       return PBHelper.convert(proto.getBlkIdCmd());
++    case BlockECRecoveryCommand:
++      return PBHelper.convert(proto.getBlkECRecoveryCmd());
+     default:
        return null;
      }
--    DatanodeInfo[] currentNodes = getStreamer().getNodes();
-+    DatanodeInfo[] currentNodes = streamer.getNodes();
-     if (currentNodes == null) {
-       return null;
-     }
-@@ -269,8 +270,14 @@ static DFSOutputStream newStreamForCreate(DFSClient dfsClient, String src,
-         }
-       }
-       Preconditions.checkNotNull(stat, "HdfsFileStatus should not be null!");
--      final DFSOutputStream out = new DFSOutputStream(dfsClient, src, stat,
--          flag, progress, checksum, favoredNodes);
-+      final DFSOutputStream out;
-+      if(stat.getECSchema() != null) {
-+        out = new DFSStripedOutputStream(dfsClient, src, stat,
-+            flag, progress, checksum, favoredNodes);
-+      } else {
-+        out = new DFSOutputStream(dfsClient, src, stat,
-+            flag, progress, checksum, favoredNodes);
-+      }
-       out.start();
-       return out;
-     } finally {
-@@ -296,9 +303,9 @@ private DFSOutputStream(DFSClient dfsClient, String src,
-       // indicate that we are appending to an existing block
-       streamer = new DataStreamer(lastBlock, stat, dfsClient, src, progress, checksum,
-           cachingStrategy, byteArrayManager);
--      getStreamer().setBytesCurBlock(lastBlock.getBlockSize());
-+      streamer.setBytesCurBlock(lastBlock.getBlockSize());
-       adjustPacketChunkSize(stat);
--      getStreamer().setPipelineInConstruction(lastBlock);
-+      streamer.setPipelineInConstruction(lastBlock);
-     } else {
-       computePacketChunkSize(dfsClient.getConf().getWritePacketSize(),
-           bytesPerChecksum);
-@@ -332,7 +339,7 @@ private void adjustPacketChunkSize(HdfsFileStatus stat) throws IOException{
-       //
-       computePacketChunkSize(0, freeInCksum);
-       setChecksumBufSize(freeInCksum);
--      getStreamer().setAppendChunk(true);
-+      streamer.setAppendChunk(true);
-     } else {
-       // if the remaining space in the block is smaller than
-       // that expected size of of a packet, then create
-@@ -350,6 +357,9 @@ static DFSOutputStream newStreamForAppend(DFSClient dfsClient, String src,
-       String[] favoredNodes) throws IOException {
-     TraceScope scope =
-         dfsClient.getPathTraceScope("newStreamForAppend", src);
-+	if(stat.getReplication() == 0) {
-+      throw new IOException("Not support appending to a striping layout file yet.");
+@@ -1103,6 +1109,11 @@ public static DatanodeCommandProto convert(DatanodeCommand datanodeCommand) {
+       builder.setCmdType(DatanodeCommandProto.Type.BlockIdCommand).
+         setBlkIdCmd(PBHelper.convert((BlockIdCommand) datanodeCommand));
+       break;
++    case DatanodeProtocol.DNA_ERASURE_CODING_RECOVERY:
++      builder.setCmdType(DatanodeCommandProto.Type.BlockECRecoveryCommand)
++          .setBlkECRecoveryCmd(
++              convert((BlockECRecoveryCommand) datanodeCommand));
++      break;
+     case DatanodeProtocol.DNA_UNKNOWN: //Not expected
+     default:
+       builder.setCmdType(DatanodeCommandProto.Type.NullDatanodeCommand);
+@@ -3140,4 +3151,139 @@ public static ErasureCodingZone convertErasureCodingZone(
+     return new ErasureCodingZone(ecZoneProto.getDir(),
+         convertECSchema(ecZoneProto.getSchema()), ecZoneProto.getCellSize());
+   }
++
++  public static BlockECRecoveryInfo convertBlockECRecoveryInfo(
++      BlockECRecoveryInfoProto blockEcRecoveryInfoProto) {
++    ExtendedBlockProto blockProto = blockEcRecoveryInfoProto.getBlock();
++    ExtendedBlock block = convert(blockProto);
++
++    DatanodeInfosProto sourceDnInfosProto = blockEcRecoveryInfoProto
++        .getSourceDnInfos();
++    DatanodeInfo[] sourceDnInfos = convert(sourceDnInfosProto);
++
++    DatanodeInfosProto targetDnInfosProto = blockEcRecoveryInfoProto
++        .getTargetDnInfos();
++    DatanodeInfo[] targetDnInfos = convert(targetDnInfosProto);
++
++    StorageUuidsProto targetStorageUuidsProto = blockEcRecoveryInfoProto
++        .getTargetStorageUuids();
++    String[] targetStorageUuids = convert(targetStorageUuidsProto);
++
++    StorageTypesProto targetStorageTypesProto = blockEcRecoveryInfoProto
++        .getTargetStorageTypes();
++    StorageType[] convertStorageTypes = convertStorageTypes(
++        targetStorageTypesProto.getStorageTypesList(), targetStorageTypesProto
++            .getStorageTypesList().size());
++
++    List<Integer> liveBlockIndicesList = blockEcRecoveryInfoProto
++        .getLiveBlockIndicesList();
++    short[] liveBlkIndices = new short[liveBlockIndicesList.size()];
++    for (int i = 0; i < liveBlockIndicesList.size(); i++) {
++      liveBlkIndices[i] = liveBlockIndicesList.get(i).shortValue();
 +    }
-     try {
-       final DFSOutputStream out = new DFSOutputStream(dfsClient, src, flags,
-           progress, lastBlock, stat, checksum, favoredNodes);
-@@ -395,50 +405,52 @@ protected synchronized void writeChunk(byte[] b, int offset, int len,
-     }
- 
-     if (currentPacket == null) {
--      currentPacket = createPacket(packetSize, chunksPerPacket, getStreamer()
--          .getBytesCurBlock(), getStreamer().getAndIncCurrentSeqno(), false);
-+      currentPacket = createPacket(packetSize, chunksPerPacket,
-+          streamer.getBytesCurBlock(), streamer.getAndIncCurrentSeqno(), false);
-       if (DFSClient.LOG.isDebugEnabled()) {
-         DFSClient.LOG.debug("DFSClient writeChunk allocating new packet seqno=" + 
-             currentPacket.getSeqno() +
-             ", src=" + src +
-             ", packetSize=" + packetSize +
-             ", chunksPerPacket=" + chunksPerPacket +
--            ", bytesCurBlock=" + getStreamer().getBytesCurBlock());
-+            ", bytesCurBlock=" + streamer.getBytesCurBlock());
-       }
-     }
- 
-     currentPacket.writeChecksum(checksum, ckoff, cklen);
-     currentPacket.writeData(b, offset, len);
-     currentPacket.incNumChunks();
--    getStreamer().incBytesCurBlock(len);
-+    streamer.incBytesCurBlock(len);
- 
-     // If packet is full, enqueue it for transmission
--    //
-     if (currentPacket.getNumChunks() == currentPacket.getMaxChunks() ||
--        getStreamer().getBytesCurBlock() == blockSize) {
-+        streamer.getBytesCurBlock() == blockSize) {
-       enqueueCurrentPacketFull();
-     }
-   }
- 
-   void enqueueCurrentPacket() throws IOException {
--    getStreamer().waitAndQueuePacket(currentPacket);
-+    streamer.waitAndQueuePacket(currentPacket);
-     currentPacket = null;
-   }
- 
-   void enqueueCurrentPacketFull() throws IOException {
--    LOG.debug("enqueue full {}, src={}, bytesCurBlock={}, blockSize={},"
--        + " appendChunk={}, {}", currentPacket, src, getStreamer()
--        .getBytesCurBlock(), blockSize, getStreamer().getAppendChunk(),
--        getStreamer());
-+    if (LOG.isDebugEnabled()) {
-+      LOG.debug("enqueue full " + currentPacket + ", src=" + src
-+          + ", bytesCurBlock=" + streamer.getBytesCurBlock()
-+          + ", blockSize=" + blockSize
-+          + ", appendChunk=" + streamer.getAppendChunk()
-+          + ", " + streamer);
++
++    ECSchema ecSchema = convertECSchema(blockEcRecoveryInfoProto.getEcSchema());
++    int cellSize = blockEcRecoveryInfoProto.getCellSize();
++
++    return new BlockECRecoveryInfo(block, sourceDnInfos, targetDnInfos,
++        targetStorageUuids, convertStorageTypes, liveBlkIndices, ecSchema,
++        cellSize);
++  }
++
++  public static BlockECRecoveryInfoProto convertBlockECRecoveryInfo(
++      BlockECRecoveryInfo blockEcRecoveryInfo) {
++    BlockECRecoveryInfoProto.Builder builder = BlockECRecoveryInfoProto
++        .newBuilder();
++    builder.setBlock(convert(blockEcRecoveryInfo.getExtendedBlock()));
++
++    DatanodeInfo[] sourceDnInfos = blockEcRecoveryInfo.getSourceDnInfos();
++    builder.setSourceDnInfos(convertToDnInfosProto(sourceDnInfos));
++
++    DatanodeInfo[] targetDnInfos = blockEcRecoveryInfo.getTargetDnInfos();
++    builder.setTargetDnInfos(convertToDnInfosProto(targetDnInfos));
++
++    String[] targetStorageIDs = blockEcRecoveryInfo.getTargetStorageIDs();
++    builder.setTargetStorageUuids(convertStorageIDs(targetStorageIDs));
++
++    StorageType[] targetStorageTypes = blockEcRecoveryInfo
++        .getTargetStorageTypes();
++    builder.setTargetStorageTypes(convertStorageTypesProto(targetStorageTypes));
++
++    short[] liveBlockIndices = blockEcRecoveryInfo.getLiveBlockIndices();
++    builder.addAllLiveBlockIndices(convertIntArray(liveBlockIndices));
++
++    builder.setEcSchema(convertECSchema(blockEcRecoveryInfo.getECSchema()));
++    builder.setCellSize(blockEcRecoveryInfo.getCellSize());
++
++    return builder.build();
++  }
++
++  private static List<Integer> convertIntArray(short[] liveBlockIndices) {
++    List<Integer> liveBlockIndicesList = new ArrayList<Integer>();
++    for (short s : liveBlockIndices) {
++      liveBlockIndicesList.add((int) s);
 +    }
-     enqueueCurrentPacket();
-     adjustChunkBoundary();
-     endBlock();
-   }
- 
--  /** create an empty packet to mark the end of the block. */
--  void setCurrentPacketToEmpty() throws InterruptedIOException {
--    currentPacket = createPacket(0, 0, getStreamer().getBytesCurBlock(),
--        getStreamer().getAndIncCurrentSeqno(), true);
-+  /** create an empty packet to mark the end of the block */
-+  void setCurrentPacket2Empty() throws InterruptedIOException {
-+    currentPacket = createPacket(0, 0, streamer.getBytesCurBlock(),
-+        streamer.getAndIncCurrentSeqno(), true);
-     currentPacket.setSyncBlock(shouldSyncBlock);
-   }
- 
-@@ -447,15 +459,15 @@ void setCurrentPacketToEmpty() throws InterruptedIOException {
-    * write filled up its partial chunk. Tell the summer to generate full
-    * crc chunks from now on.
-    */
--  protected void adjustChunkBoundary() {
--    if (getStreamer().getAppendChunk() &&
--        getStreamer().getBytesCurBlock() % bytesPerChecksum == 0) {
--      getStreamer().setAppendChunk(false);
-+  private void adjustChunkBoundary() {
-+    if (streamer.getAppendChunk() &&
-+        streamer.getBytesCurBlock() % bytesPerChecksum == 0) {
-+      streamer.setAppendChunk(false);
-       resetChecksumBufSize();
-     }
- 
--    if (!getStreamer().getAppendChunk()) {
--      int psize = Math.min((int)(blockSize- getStreamer().getBytesCurBlock()),
-+    if (!streamer.getAppendChunk()) {
-+      int psize = Math.min((int)(blockSize- streamer.getBytesCurBlock()),
-           dfsClient.getConf().getWritePacketSize());
-       computePacketChunkSize(psize, bytesPerChecksum);
-     }
-@@ -468,10 +480,10 @@ protected void adjustChunkBoundary() {
-    * @throws IOException
-    */
-   protected void endBlock() throws IOException {
--    if (getStreamer().getBytesCurBlock() == blockSize) {
--      setCurrentPacketToEmpty();
-+    if (streamer.getBytesCurBlock() == blockSize) {
-+      setCurrentPacket2Empty();
-       enqueueCurrentPacket();
--      getStreamer().setBytesCurBlock(0);
-+      streamer.setBytesCurBlock(0);
-       lastFlushOffset = 0;
-     }
-   }
-@@ -560,33 +572,30 @@ private void flushOrSync(boolean isSync, EnumSet<SyncFlag> syncFlags)
- 
-         if (DFSClient.LOG.isDebugEnabled()) {
-           DFSClient.LOG.debug("DFSClient flush(): "
--              + " bytesCurBlock=" + getStreamer().getBytesCurBlock()
-+              + " bytesCurBlock=" + streamer.getBytesCurBlock()
-               + " lastFlushOffset=" + lastFlushOffset
-               + " createNewBlock=" + endBlock);
-         }
-         // Flush only if we haven't already flushed till this offset.
--        if (lastFlushOffset != getStreamer().getBytesCurBlock()) {
--          assert getStreamer().getBytesCurBlock() > lastFlushOffset;
-+        if (lastFlushOffset != streamer.getBytesCurBlock()) {
-+          assert streamer.getBytesCurBlock() > lastFlushOffset;
-           // record the valid offset of this flush
--          lastFlushOffset = getStreamer().getBytesCurBlock();
-+          lastFlushOffset = streamer.getBytesCurBlock();
-           if (isSync && currentPacket == null && !endBlock) {
-             // Nothing to send right now,
-             // but sync was requested.
-             // Send an empty packet if we do not end the block right now
-             currentPacket = createPacket(packetSize, chunksPerPacket,
--                getStreamer().getBytesCurBlock(), getStreamer()
--                    .getAndIncCurrentSeqno(), false);
-+                streamer.getBytesCurBlock(), streamer.getAndIncCurrentSeqno(), false);
-           }
-         } else {
--          if (isSync && getStreamer().getBytesCurBlock() > 0 && !endBlock) {
-+          if (isSync && streamer.getBytesCurBlock() > 0 && !endBlock) {
-             // Nothing to send right now,
-             // and the block was partially written,
-             // and sync was requested.
--            // So send an empty sync packet if we do not end the block right
--            // now
-+            // So send an empty sync packet if we do not end the block right now
-             currentPacket = createPacket(packetSize, chunksPerPacket,
--                getStreamer().getBytesCurBlock(), getStreamer()
--                    .getAndIncCurrentSeqno(), false);
-+                streamer.getBytesCurBlock(), streamer.getAndIncCurrentSeqno(), false);
-           } else if (currentPacket != null) {
-             // just discard the current packet since it is already been sent.
-             currentPacket.releaseBuffer(byteArrayManager);
-@@ -597,40 +606,38 @@ private void flushOrSync(boolean isSync, EnumSet<SyncFlag> syncFlags)
-           currentPacket.setSyncBlock(isSync);
-           enqueueCurrentPacket();
-         }
--        if (endBlock && getStreamer().getBytesCurBlock() > 0) {
-+        if (endBlock && streamer.getBytesCurBlock() > 0) {
-           // Need to end the current block, thus send an empty packet to
-           // indicate this is the end of the block and reset bytesCurBlock
--          currentPacket = createPacket(0, 0, getStreamer().getBytesCurBlock(),
--              getStreamer().getAndIncCurrentSeqno(), true);
-+          currentPacket = createPacket(0, 0, streamer.getBytesCurBlock(),
-+              streamer.getAndIncCurrentSeqno(), true);
-           currentPacket.setSyncBlock(shouldSyncBlock || isSync);
-           enqueueCurrentPacket();
--          getStreamer().setBytesCurBlock(0);
-+          streamer.setBytesCurBlock(0);
-           lastFlushOffset = 0;
-         } else {
-           // Restore state of stream. Record the last flush offset
-           // of the last full chunk that was flushed.
--          getStreamer().setBytesCurBlock(
--              getStreamer().getBytesCurBlock() - numKept);
-+          streamer.setBytesCurBlock(streamer.getBytesCurBlock() - numKept);
-         }
- 
--        toWaitFor = getStreamer().getLastQueuedSeqno();
-+        toWaitFor = streamer.getLastQueuedSeqno();
-       } // end synchronized
- 
--      getStreamer().waitForAckedSeqno(toWaitFor);
-+      streamer.waitForAckedSeqno(toWaitFor);
- 
-       // update the block length first time irrespective of flag
--      if (updateLength || getStreamer().getPersistBlocks().get()) {
-+      if (updateLength || streamer.getPersistBlocks().get()) {
-         synchronized (this) {
--          if (!getStreamer().streamerClosed()
--              && getStreamer().getBlock() != null) {
--            lastBlockLength = getStreamer().getBlock().getNumBytes();
-+          if (!streamer.streamerClosed() && streamer.getBlock() != null) {
-+            lastBlockLength = streamer.getBlock().getNumBytes();
-           }
-         }
-       }
-       // If 1) any new blocks were allocated since the last flush, or 2) to
-       // update length in NN is required, then persist block locations on
-       // namenode.
--      if (getStreamer().getPersistBlocks().getAndSet(false) || updateLength) {
-+      if (streamer.getPersistBlocks().getAndSet(false) || updateLength) {
-         try {
-           dfsClient.namenode.fsync(src, fileId, dfsClient.clientName,
-               lastBlockLength);
-@@ -647,8 +654,8 @@ private void flushOrSync(boolean isSync, EnumSet<SyncFlag> syncFlags)
-       }
- 
-       synchronized(this) {
--        if (!getStreamer().streamerClosed()) {
--          getStreamer().setHflush();
-+        if (!streamer.streamerClosed()) {
-+          streamer.setHflush();
-         }
-       }
-     } catch (InterruptedIOException interrupt) {
-@@ -660,7 +667,7 @@ private void flushOrSync(boolean isSync, EnumSet<SyncFlag> syncFlags)
-       DFSClient.LOG.warn("Error while syncing", e);
-       synchronized (this) {
-         if (!isClosed()) {
--          getStreamer().getLastException().set(e);
-+          streamer.getLastException().set(e);
-           closeThreads(true);
-         }
-       }
-@@ -685,10 +692,10 @@ public synchronized int getNumCurrentReplicas() throws IOException {
-   public synchronized int getCurrentBlockReplication() throws IOException {
-     dfsClient.checkOpen();
-     checkClosed();
--    if (getStreamer().streamerClosed()) {
-+    if (streamer.streamerClosed()) {
-       return blockReplication; // no pipeline, return repl factor of file
-     }
--    DatanodeInfo[] currentNodes = getStreamer().getNodes();
-+    DatanodeInfo[] currentNodes = streamer.getNodes();
-     if (currentNodes == null) {
-       return blockReplication; // no pipeline, return repl factor of file
-     }
-@@ -707,16 +714,16 @@ protected void flushInternal() throws IOException {
-       //
-       // If there is data in the current buffer, send it across
-       //
--      getStreamer().queuePacket(currentPacket);
-+      streamer.queuePacket(currentPacket);
-       currentPacket = null;
--      toWaitFor = getStreamer().getLastQueuedSeqno();
-+      toWaitFor = streamer.getLastQueuedSeqno();
-     }
- 
--    getStreamer().waitForAckedSeqno(toWaitFor);
-+    streamer.waitForAckedSeqno(toWaitFor);
-   }
- 
-   protected synchronized void start() {
--    getStreamer().start();
-+    streamer.start();
-   }
-   
-   /**
-@@ -727,32 +734,32 @@ synchronized void abort() throws IOException {
-     if (isClosed()) {
-       return;
-     }
--    getStreamer().getLastException().set(new IOException("Lease timeout of "
-+    streamer.getLastException().set(new IOException("Lease timeout of "
-         + (dfsClient.getConf().getHdfsTimeout()/1000) + " seconds expired."));
-     closeThreads(true);
-     dfsClient.endFileLease(fileId);
-   }
- 
-   boolean isClosed() {
--    return closed || getStreamer().streamerClosed();
-+    return closed || streamer.streamerClosed();
-   }
- 
-   void setClosed() {
-     closed = true;
--    getStreamer().release();
-+    streamer.release();
-   }
- 
-   // shutdown datastreamer and responseprocessor threads.
-   // interrupt datastreamer if force is true
-   protected void closeThreads(boolean force) throws IOException {
-     try {
--      getStreamer().close(force);
--      getStreamer().join();
--      getStreamer().closeSocket();
-+      streamer.close(force);
-+      streamer.join();
-+      streamer.closeSocket();
-     } catch (InterruptedException e) {
-       throw new IOException("Failed to shutdown streamer");
-     } finally {
--      getStreamer().setSocketToNull();
-+      streamer.setSocketToNull();
-       setClosed();
-     }
-   }
-@@ -774,7 +781,7 @@ public synchronized void close() throws IOException {
- 
-   protected synchronized void closeImpl() throws IOException {
-     if (isClosed()) {
--      getStreamer().getLastException().check(true);
-+      streamer.getLastException().check(true);
-       return;
-     }
- 
-@@ -785,13 +792,13 @@ protected synchronized void closeImpl() throws IOException {
-         enqueueCurrentPacket();
-       }
- 
--      if (getStreamer().getBytesCurBlock() != 0) {
--        setCurrentPacketToEmpty();
-+      if (streamer.getBytesCurBlock() != 0) {
-+        setCurrentPacket2Empty();
-       }
- 
-       flushInternal();             // flush all data to Datanodes
-       // get last block before destroying the streamer
--      ExtendedBlock lastBlock = getStreamer().getBlock();
-+      ExtendedBlock lastBlock = streamer.getBlock();
-       closeThreads(false);
-       TraceScope scope = Trace.startSpan("completeFile", Sampler.NEVER);
-       try {
-@@ -849,7 +856,7 @@ protected void completeFile(ExtendedBlock last) throws IOException {
- 
-   @VisibleForTesting
-   public void setArtificialSlowdown(long period) {
--    getStreamer().setArtificialSlowdown(period);
-+    streamer.setArtificialSlowdown(period);
-   }
- 
-   @VisibleForTesting
-@@ -876,7 +883,7 @@ public FileEncryptionInfo getFileEncryptionInfo() {
-    * Returns the access token currently used by streamer, for testing only
-    */
-   synchronized Token<BlockTokenIdentifier> getBlockToken() {
--    return getStreamer().getBlockToken();
-+    return streamer.getBlockToken();
-   }
- 
-   @Override
-@@ -893,7 +900,7 @@ public void setDropBehind(Boolean dropBehind) throws IOException {
- 
-   @VisibleForTesting
-   ExtendedBlock getBlock() {
--    return getStreamer().getBlock();
-+    return streamer.getBlock();
-   }
- 
-   @VisibleForTesting
-@@ -901,10 +908,8 @@ public long getFileId() {
-     return fileId;
-   }
- 
--  /**
--   * Returns the data streamer object.
--   */
--  protected DataStreamer getStreamer() {
--    return streamer;
-+  @Override
-+  public String toString() {
-+    return getClass().getSimpleName() + ":" + streamer;
-   }
++    return liveBlockIndicesList;
++  }
++
++  private static StorageTypesProto convertStorageTypesProto(
++      StorageType[] targetStorageTypes) {
++    StorageTypesProto.Builder builder = StorageTypesProto.newBuilder();
++    for (StorageType storageType : targetStorageTypes) {
++      builder.addStorageTypes(convertStorageType(storageType));
++    }
++    return builder.build();
++  }
++
++  private static StorageUuidsProto convertStorageIDs(String[] targetStorageIDs) {
++    StorageUuidsProto.Builder builder = StorageUuidsProto.newBuilder();
++    for (String storageUuid : targetStorageIDs) {
++      builder.addStorageUuids(storageUuid);
++    }
++    return builder.build();
++  }
++
++  private static DatanodeInfosProto convertToDnInfosProto(DatanodeInfo[] dnInfos) {
++    DatanodeInfosProto.Builder builder = DatanodeInfosProto.newBuilder();
++    for (DatanodeInfo datanodeInfo : dnInfos) {
++      builder.addDatanodes(convert(datanodeInfo));
++    }
++    return builder.build();
++  }
++
++  private static String[] convert(StorageUuidsProto targetStorageUuidsProto) {
++    List<String> storageUuidsList = targetStorageUuidsProto
++        .getStorageUuidsList();
++    String[] storageUuids = new String[storageUuidsList.size()];
++    for (int i = 0; i < storageUuidsList.size(); i++) {
++      storageUuids[i] = storageUuidsList.get(i);
++    }
++    return storageUuids;
++  }
++
++  public static BlockECRecoveryCommandProto convert(
++      BlockECRecoveryCommand blkECRecoveryCmd) {
++    BlockECRecoveryCommandProto.Builder builder = BlockECRecoveryCommandProto
++        .newBuilder();
++    Collection<BlockECRecoveryInfo> blockECRecoveryInfos = blkECRecoveryCmd
++        .getECTasks();
++    for (BlockECRecoveryInfo blkECRecoveryInfo : blockECRecoveryInfos) {
++      builder
++          .addBlockECRecoveryinfo(convertBlockECRecoveryInfo(blkECRecoveryInfo));
++    }
++    return builder.build();
++  }
++
++  public static BlockECRecoveryCommand convert(
++      BlockECRecoveryCommandProto blkECRecoveryCmdProto) {
++    Collection<BlockECRecoveryInfo> blkECRecoveryInfos = new ArrayList<BlockECRecoveryInfo>();
++    List<BlockECRecoveryInfoProto> blockECRecoveryinfoList = blkECRecoveryCmdProto
++        .getBlockECRecoveryinfoList();
++    for (BlockECRecoveryInfoProto blockECRecoveryInfoProto : blockECRecoveryinfoList) {
++      blkECRecoveryInfos
++          .add(convertBlockECRecoveryInfo(blockECRecoveryInfoProto));
++    }
++    return new BlockECRecoveryCommand(DatanodeProtocol.DNA_ERASURE_CODING_RECOVERY,
++        blkECRecoveryInfos);
++  }
  }
-diff --git a/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/DFSPacket.java b/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/DFSPacket.java
-index 22055c3..a26e35e 100755
---- a/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/DFSPacket.java
-+++ b/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/DFSPacket.java
-@@ -20,6 +20,7 @@
- import java.io.DataOutputStream;
- import java.io.IOException;
- import java.nio.BufferOverflowException;
-+import java.nio.ByteBuffer;
- import java.nio.channels.ClosedChannelException;
- import java.util.Arrays;
+diff --git a/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/blockmanagement/BlockManager.java b/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/blockmanagement/BlockManager.java
+index 2ef8dee..763f560 100644
+--- a/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/blockmanagement/BlockManager.java
++++ b/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/blockmanagement/BlockManager.java
+@@ -556,9 +556,9 @@ private void dumpBlockMeta(Block block, PrintWriter out) {
  
-@@ -36,7 +37,7 @@
-  ****************************************************************/
- 
- @InterfaceAudience.Private
--class DFSPacket {
-+public class DFSPacket {
-   public static final long HEART_BEAT_SEQNO = -1L;
-   private static long[] EMPTY = new long[0];
-   private final long seqno; // sequence number of buffer in block
-@@ -79,7 +80,7 @@
-    * @param checksumSize the size of checksum
-    * @param lastPacketInBlock if this is the last packet
-    */
--  DFSPacket(byte[] buf, int chunksPerPkt, long offsetInBlock, long seqno,
-+  public DFSPacket(byte[] buf, int chunksPerPkt, long offsetInBlock, long seqno,
-                    int checksumSize, boolean lastPacketInBlock) {
-     this.lastPacketInBlock = lastPacketInBlock;
-     this.numChunks = 0;
-@@ -113,6 +114,19 @@ synchronized void writeData(byte[] inarray, int off, int len)
-     dataPos += len;
+     NumberReplicas numReplicas = new NumberReplicas();
+     // source node returned is not used
+-    chooseSourceDatanode(block, containingNodes,
++    chooseSourceDatanodes(getStoredBlock(block), containingNodes,
+         containingLiveReplicasNodes, numReplicas,
+-        UnderReplicatedBlocks.LEVEL);
++        new LinkedList<Short>(), UnderReplicatedBlocks.LEVEL);
+     
+     // containingLiveReplicasNodes can include READ_ONLY_SHARED replicas which are 
+     // not included in the numReplicas.liveReplicas() count
+@@ -1385,15 +1385,15 @@ int computeInvalidateWork(int nodesToProcess) {
    }
  
-+  public synchronized void writeData(ByteBuffer inBuffer, int len)
-+      throws ClosedChannelException {
-+    checkBuffer();
-+    len =  len > inBuffer.remaining() ? inBuffer.remaining() : len;
-+    if (dataPos + len > buf.length) {
-+      throw new BufferOverflowException();
-+    }
-+    for (int i = 0; i < len; i++) {
-+      buf[dataPos + i] = inBuffer.get();
-+    }
-+    dataPos += len;
+   /**
+-   * Scan blocks in {@link #neededReplications} and assign replication
+-   * work to data-nodes they belong to.
++   * Scan blocks in {@link #neededReplications} and assign recovery
++   * (replication or erasure coding) work to data-nodes they belong to.
+    *
+    * The number of process blocks equals either twice the number of live
+    * data-nodes or the number of under-replicated blocks whichever is less.
+    *
+    * @return number of blocks scheduled for replication during this iteration.
+    */
+-  int computeReplicationWork(int blocksToProcess) {
++  int computeBlockRecoveryWork(int blocksToProcess) {
+     List<List<BlockInfo>> blocksToReplicate = null;
+     namesystem.writeLock();
+     try {
+@@ -1403,30 +1403,32 @@ int computeReplicationWork(int blocksToProcess) {
+     } finally {
+       namesystem.writeUnlock();
+     }
+-    return computeReplicationWorkForBlocks(blocksToReplicate);
++    return computeRecoveryWorkForBlocks(blocksToReplicate);
+   }
+ 
+-  /** Replicate a set of blocks
++  /**
++   * Recover a set of blocks to full strength through replication or
++   * erasure coding
+    *
+-   * @param blocksToReplicate blocks to be replicated, for each priority
++   * @param blocksToRecover blocks to be recovered, for each priority
+    * @return the number of blocks scheduled for replication
+    */
+   @VisibleForTesting
+-  int computeReplicationWorkForBlocks(List<List<BlockInfo>> blocksToReplicate) {
++  int computeRecoveryWorkForBlocks(List<List<BlockInfo>> blocksToRecover) {
+     int requiredReplication, numEffectiveReplicas;
+     List<DatanodeDescriptor> containingNodes;
+-    DatanodeDescriptor srcNode;
+-    BlockCollection bc = null;
++    BlockCollection bc;
+     int additionalReplRequired;
+ 
+     int scheduledWork = 0;
+-    List<ReplicationWork> work = new LinkedList<>();
++    List<BlockRecoveryWork> recovWork = new LinkedList<>();
+ 
++    // Step 1: categorize at-risk blocks into replication and EC tasks
+     namesystem.writeLock();
+     try {
+       synchronized (neededReplications) {
+-        for (int priority = 0; priority < blocksToReplicate.size(); priority++) {
+-          for (BlockInfo block : blocksToReplicate.get(priority)) {
++        for (int priority = 0; priority < blocksToRecover.size(); priority++) {
++          for (BlockInfo block : blocksToRecover.get(priority)) {
+             // block should belong to a file
+             bc = blocksMap.getBlockCollection(block);
+             // abandoned block or block reopened for append
+@@ -1443,28 +1445,31 @@ int computeReplicationWorkForBlocks(List<List<BlockInfo>> blocksToReplicate) {
+             containingNodes = new ArrayList<>();
+             List<DatanodeStorageInfo> liveReplicaNodes = new ArrayList<>();
+             NumberReplicas numReplicas = new NumberReplicas();
+-            srcNode = chooseSourceDatanode(
+-                block, containingNodes, liveReplicaNodes, numReplicas,
+-                priority);
+-            if(srcNode == null) { // block can not be replicated from any node
+-              LOG.debug("Block " + block + " cannot be repl from any node");
++            List<Short> liveBlockIndices = new ArrayList<>();
++            final DatanodeDescriptor[] srcNodes = chooseSourceDatanodes(block,
++                containingNodes, liveReplicaNodes, numReplicas,
++                liveBlockIndices, priority);
++            if(srcNodes == null || srcNodes.length == 0) {
++              // block can not be replicated from any node
++              LOG.debug("Block " + block + " cannot be recovered " +
++                  "from any node");
+               continue;
+             }
+ 
+-            // liveReplicaNodes can include READ_ONLY_SHARED replicas which are 
++            // liveReplicaNodes can include READ_ONLY_SHARED replicas which are
+             // not included in the numReplicas.liveReplicas() count
+             assert liveReplicaNodes.size() >= numReplicas.liveReplicas();
+ 
+             // do not schedule more if enough replicas is already pending
+             numEffectiveReplicas = numReplicas.liveReplicas() +
+-                                    pendingReplications.getNumReplicas(block);
+-      
++                pendingReplications.getNumReplicas(block);
++
+             if (numEffectiveReplicas >= requiredReplication) {
+               if ( (pendingReplications.getNumReplicas(block) > 0) ||
+-                   (blockHasEnoughRacks(block, requiredReplication)) ) {
++                  (blockHasEnoughRacks(block, requiredReplication)) ) {
+                 neededReplications.remove(block, priority); // remove from neededReplications
+                 blockLog.info("BLOCK* Removing {} from neededReplications as" +
+-                        " it has enough replicas", block);
++                    " it has enough replicas", block);
+                 continue;
+               }
+             }
+@@ -1475,9 +1480,20 @@ int computeReplicationWorkForBlocks(List<List<BlockInfo>> blocksToReplicate) {
+             } else {
+               additionalReplRequired = 1; // Needed on a new rack
+             }
+-            work.add(new ReplicationWork(block, bc, srcNode,
+-                containingNodes, liveReplicaNodes, additionalReplRequired,
+-                priority));
++            if (block.isStriped()) {
++              short[] indices = new short[liveBlockIndices.size()];
++              for (int i = 0 ; i < liveBlockIndices.size(); i++) {
++                indices[i] = liveBlockIndices.get(i);
++              }
++              ErasureCodingWork ecw = new ErasureCodingWork(block, bc, srcNodes,
++                  containingNodes, liveReplicaNodes, additionalReplRequired,
++                  priority, indices);
++              recovWork.add(ecw);
++            } else {
++              recovWork.add(new ReplicationWork(block, bc, srcNodes,
++                  containingNodes, liveReplicaNodes, additionalReplRequired,
++                  priority));
++            }
+           }
+         }
+       }
+@@ -1485,8 +1501,9 @@ int computeReplicationWorkForBlocks(List<List<BlockInfo>> blocksToReplicate) {
+       namesystem.writeUnlock();
+     }
+ 
+-    final Set<Node> excludedNodes = new HashSet<>();
+-    for(ReplicationWork rw : work){
++    // Step 2: choose target nodes for each recovery task
++    final Set<Node> excludedNodes = new HashSet<Node>();
++    for(BlockRecoveryWork rw : recovWork){
+       // Exclude all of the containing nodes from being targets.
+       // This list includes decommissioning or corrupt nodes.
+       excludedNodes.clear();
+@@ -1502,9 +1519,10 @@ int computeReplicationWorkForBlocks(List<List<BlockInfo>> blocksToReplicate) {
+       rw.chooseTargets(placementPolicy, storagePolicySuite, excludedNodes);
+     }
+ 
++    // Step 3: add tasks to the DN
+     namesystem.writeLock();
+     try {
+-      for(ReplicationWork rw : work){
++      for(BlockRecoveryWork rw : recovWork){
+         final DatanodeStorageInfo[] targets = rw.targets;
+         if(targets == null || targets.length == 0){
+           rw.targets = null;
+@@ -1528,22 +1546,22 @@ int computeReplicationWorkForBlocks(List<List<BlockInfo>> blocksToReplicate) {
+           // do not schedule more if enough replicas is already pending
+           NumberReplicas numReplicas = countNodes(block);
+           numEffectiveReplicas = numReplicas.liveReplicas() +
+-            pendingReplications.getNumReplicas(block);
++              pendingReplications.getNumReplicas(block);
+ 
+           if (numEffectiveReplicas >= requiredReplication) {
+             if ( (pendingReplications.getNumReplicas(block) > 0) ||
+-                 (blockHasEnoughRacks(block, requiredReplication)) ) {
++                (blockHasEnoughRacks(block, requiredReplication)) ) {
+               neededReplications.remove(block, priority); // remove from neededReplications
+               rw.targets = null;
+               blockLog.info("BLOCK* Removing {} from neededReplications as" +
+-                      " it has enough replicas", block);
++                  " it has enough replicas", block);
+               continue;
+             }
+           }
+ 
+           if ( (numReplicas.liveReplicas() >= requiredReplication) &&
+-               (!blockHasEnoughRacks(block, requiredReplication)) ) {
+-            if (rw.srcNode.getNetworkLocation().equals(
++              (!blockHasEnoughRacks(block, requiredReplication)) ) {
++            if (rw.srcNodes[0].getNetworkLocation().equals(
+                 targets[0].getDatanodeDescriptor().getNetworkLocation())) {
+               //No use continuing, unless a new rack in this case
+               continue;
+@@ -1551,7 +1569,32 @@ int computeReplicationWorkForBlocks(List<List<BlockInfo>> blocksToReplicate) {
+           }
+ 
+           // Add block to the to be replicated list
+-          rw.srcNode.addBlockToBeReplicated(block, targets);
++          if (block.isStriped()) {
++            assert rw instanceof ErasureCodingWork;
++            assert rw.targets.length > 0;
++            String src = block.getBlockCollection().getName();
++            ErasureCodingZone ecZone = null;
++            try {
++              ecZone = namesystem.getErasureCodingZoneForPath(src);
++            } catch (IOException e) {
++              blockLog
++                  .warn("Failed to get the EC zone for the file {} ", src);
++            }
++            if (ecZone == null) {
++              blockLog.warn("No EC schema found for the file {}. "
++                  + "So cannot proceed for recovery", src);
++              // TODO: we may have to revisit later for what we can do better to
++              // handle this case.
++              continue;
++            }
++            rw.targets[0].getDatanodeDescriptor().addBlockToBeErasureCoded(
++                new ExtendedBlock(namesystem.getBlockPoolId(), block),
++                rw.srcNodes, rw.targets,
++                ((ErasureCodingWork) rw).liveBlockIndicies,
++                ecZone.getSchema(), ecZone.getCellSize());
++          } else {
++            rw.srcNodes[0].addBlockToBeReplicated(block, targets);
++          }
+           scheduledWork++;
+           DatanodeStorageInfo.incrementBlocksScheduled(targets);
+ 
+@@ -1561,7 +1604,7 @@ int computeReplicationWorkForBlocks(List<List<BlockInfo>> blocksToReplicate) {
+           pendingReplications.increment(block,
+               DatanodeStorageInfo.toDatanodeDescriptors(targets));
+           blockLog.debug("BLOCK* block {} is moved from neededReplications to "
+-                  + "pendingReplications", block);
++              + "pendingReplications", block);
+ 
+           // remove from neededReplications
+           if(numEffectiveReplicas + targets.length >= requiredReplication) {
+@@ -1575,15 +1618,15 @@ int computeReplicationWorkForBlocks(List<List<BlockInfo>> blocksToReplicate) {
+ 
+     if (blockLog.isInfoEnabled()) {
+       // log which blocks have been scheduled for replication
+-      for(ReplicationWork rw : work){
++      for(BlockRecoveryWork rw : recovWork){
+         DatanodeStorageInfo[] targets = rw.targets;
+         if (targets != null && targets.length != 0) {
+           StringBuilder targetList = new StringBuilder("datanode(s)");
+-          for (int k = 0; k < targets.length; k++) {
++          for (DatanodeStorageInfo target : targets) {
+             targetList.append(' ');
+-            targetList.append(targets[k].getDatanodeDescriptor());
++            targetList.append(target.getDatanodeDescriptor());
+           }
+-          blockLog.info("BLOCK* ask {} to replicate {} to {}", rw.srcNode,
++          blockLog.info("BLOCK* ask {} to replicate {} to {}", rw.srcNodes,
+               rw.block, targetList);
+         }
+       }
+@@ -1673,55 +1716,59 @@ int computeReplicationWorkForBlocks(List<List<BlockInfo>> blocksToReplicate) {
+   }
+ 
+   /**
+-   * Parse the data-nodes the block belongs to and choose one,
+-   * which will be the replication source.
++   * Parse the data-nodes the block belongs to and choose a certain number
++   * from them to be the recovery sources.
+    *
+    * We prefer nodes that are in DECOMMISSION_INPROGRESS state to other nodes
+    * since the former do not have write traffic and hence are less busy.
+    * We do not use already decommissioned nodes as a source.
+-   * Otherwise we choose a random node among those that did not reach their
+-   * replication limits.  However, if the replication is of the highest priority
+-   * and all nodes have reached their replication limits, we will choose a
+-   * random node despite the replication limit.
++   * Otherwise we randomly choose nodes among those that did not reach their
++   * replication limits. However, if the recovery work is of the highest
++   * priority and all nodes have reached their replication limits, we will
++   * randomly choose the desired number of nodes despite the replication limit.
+    *
+    * In addition form a list of all nodes containing the block
+    * and calculate its replication numbers.
+    *
+    * @param block Block for which a replication source is needed
+-   * @param containingNodes List to be populated with nodes found to contain the 
+-   *                        given block
+-   * @param nodesContainingLiveReplicas List to be populated with nodes found to
+-   *                                    contain live replicas of the given block
+-   * @param numReplicas NumberReplicas instance to be initialized with the 
+-   *                                   counts of live, corrupt, excess, and
+-   *                                   decommissioned replicas of the given
+-   *                                   block.
++   * @param containingNodes List to be populated with nodes found to contain
++   *                        the given block
++   * @param nodesContainingLiveReplicas List to be populated with nodes found
++   *                                    to contain live replicas of the given
++   *                                    block
++   * @param numReplicas NumberReplicas instance to be initialized with the
++   *                    counts of live, corrupt, excess, and decommissioned
++   *                    replicas of the given block.
++   * @param liveBlockIndices List to be populated with indices of healthy
++   *                         blocks in a striped block group
+    * @param priority integer representing replication priority of the given
+    *                 block
+-   * @return the DatanodeDescriptor of the chosen node from which to replicate
+-   *         the given block
++   * @return the array of DatanodeDescriptor of the chosen nodes from which to
++   *         recover the given block
+    */
+-   @VisibleForTesting
+-   DatanodeDescriptor chooseSourceDatanode(Block block,
+-       List<DatanodeDescriptor> containingNodes,
+-       List<DatanodeStorageInfo>  nodesContainingLiveReplicas,
+-       NumberReplicas numReplicas,
+-       int priority) {
++  @VisibleForTesting
++  DatanodeDescriptor[] chooseSourceDatanodes(BlockInfo block,
++      List<DatanodeDescriptor> containingNodes,
++      List<DatanodeStorageInfo> nodesContainingLiveReplicas,
++      NumberReplicas numReplicas,
++      List<Short> liveBlockIndices, int priority) {
+     containingNodes.clear();
+     nodesContainingLiveReplicas.clear();
+-    DatanodeDescriptor srcNode = null;
++    List<DatanodeDescriptor> srcNodes = new ArrayList<>();
+     int live = 0;
+     int decommissioned = 0;
+     int decommissioning = 0;
+     int corrupt = 0;
+     int excess = 0;
+-    
++    liveBlockIndices.clear();
++    final boolean isStriped = block.isStriped();
++
+     Collection<DatanodeDescriptor> nodesCorrupt = corruptReplicas.getNodes(block);
+-    for(DatanodeStorageInfo storage : getStorages(block)) {
++    for (DatanodeStorageInfo storage : blocksMap.getStorages(block)) {
+       final DatanodeDescriptor node = storage.getDatanodeDescriptor();
+       LightWeightLinkedSet<BlockInfo> excessBlocks =
+-        excessReplicateMap.get(node.getDatanodeUuid());
+-      int countableReplica = storage.getState() == State.NORMAL ? 1 : 0; 
++          excessReplicateMap.get(node.getDatanodeUuid());
++      int countableReplica = storage.getState() == State.NORMAL ? 1 : 0;
+       if ((nodesCorrupt != null) && (nodesCorrupt.contains(node)))
+         corrupt += countableReplica;
+       else if (node.isDecommissionInProgress()) {
+@@ -1739,8 +1786,8 @@ else if (node.isDecommissionInProgress()) {
+       // If so, do not select the node as src node
+       if ((nodesCorrupt != null) && nodesCorrupt.contains(node))
+         continue;
+-      if(priority != UnderReplicatedBlocks.QUEUE_HIGHEST_PRIORITY 
+-          && !node.isDecommissionInProgress() 
++      if(priority != UnderReplicatedBlocks.QUEUE_HIGHEST_PRIORITY
++          && !node.isDecommissionInProgress()
+           && node.getNumberOfBlocksToBeReplicated() >= maxReplicationStreams)
+       {
+         continue; // already reached replication limit
+@@ -1756,21 +1803,25 @@ else if (node.isDecommissionInProgress()) {
+       if(node.isDecommissioned())
+         continue;
+ 
+-      // We got this far, current node is a reasonable choice
+-      if (srcNode == null) {
+-        srcNode = node;
++      if(isStriped || srcNodes.isEmpty()) {
++        srcNodes.add(node);
++        if (isStriped) {
++          liveBlockIndices.add((short) block.getStripedBlockStorageOp().
++              getStorageBlockIndex(storage));
++        }
+         continue;
+       }
+-      // switch to a different node randomly
++      // for replicated block, switch to a different node randomly
+       // this to prevent from deterministically selecting the same node even
+       // if the node failed to replicate the block on previous iterations
+-      if(ThreadLocalRandom.current().nextBoolean())
+-        srcNode = node;
++      if (!isStriped && ThreadLocalRandom.current().nextBoolean()) {
++        srcNodes.set(0, node);
++      }
+     }
+     if(numReplicas != null)
+       numReplicas.initialize(live, decommissioned, decommissioning, corrupt,
+           excess, 0);
+-    return srcNode;
++    return srcNodes.toArray(new DatanodeDescriptor[srcNodes.size()]);
+   }
+ 
+   /**
+@@ -3973,7 +4024,7 @@ public int numOfUnderReplicatedBlocks() {
+   }
+ 
+   /**
+-   * Periodically calls computeReplicationWork().
++   * Periodically calls {@link #computeBlockRecoveryWork}.
+    */
+   private class ReplicationMonitor implements Runnable {
+ 
+@@ -4031,7 +4082,7 @@ int computeDatanodeWork() {
+     final int nodesToProcess = (int) Math.ceil(numlive
+         * this.blocksInvalidateWorkPct);
+ 
+-    int workFound = this.computeReplicationWork(blocksToProcess);
++    int workFound = this.computeBlockRecoveryWork(blocksToProcess);
+ 
+     // Update counters
+     namesystem.writeLock();
+@@ -4096,47 +4147,108 @@ public static LocatedStripedBlock newLocatedStripedBlock(
+         null);
+   }
+ 
+-  private static class ReplicationWork {
+-
+-    private final BlockInfo block;
+-    private final BlockCollection bc;
++  /**
++   * This class is used internally by {@link this#computeRecoveryWorkForBlocks}
++   * to represent a task to recover a block through replication or erasure
++   * coding. Recovery is done by transferring data from srcNodes to targets
++   */
++  private abstract static class BlockRecoveryWork {
++    final BlockInfo block;
++    final BlockCollection bc;
+ 
+-    private final DatanodeDescriptor srcNode;
+-    private final List<DatanodeDescriptor> containingNodes;
+-    private final List<DatanodeStorageInfo> liveReplicaStorages;
+-    private final int additionalReplRequired;
++    /**
++     * An erasure coding recovery task has multiple source nodes.
++     * A replication task only has 1 source node, stored on top of the array
++     */
++    final DatanodeDescriptor[] srcNodes;
++    /** Nodes containing the block; avoid them in choosing new targets */
++    final List<DatanodeDescriptor> containingNodes;
++    /** Required by {@link BlockPlacementPolicy#chooseTarget} */
++    final List<DatanodeStorageInfo> liveReplicaStorages;
++    final int additionalReplRequired;
+ 
+-    private DatanodeStorageInfo targets[];
+-    private final int priority;
++    DatanodeStorageInfo[] targets;
++    final int priority;
+ 
+-    public ReplicationWork(BlockInfo block,
++    BlockRecoveryWork(BlockInfo block,
+         BlockCollection bc,
+-        DatanodeDescriptor srcNode,
++        DatanodeDescriptor[] srcNodes,
+         List<DatanodeDescriptor> containingNodes,
+         List<DatanodeStorageInfo> liveReplicaStorages,
+         int additionalReplRequired,
+         int priority) {
+       this.block = block;
+       this.bc = bc;
+-      this.srcNode = srcNode;
+-      this.srcNode.incrementPendingReplicationWithoutTargets();
++      this.srcNodes = srcNodes;
+       this.containingNodes = containingNodes;
+       this.liveReplicaStorages = liveReplicaStorages;
+       this.additionalReplRequired = additionalReplRequired;
+       this.priority = priority;
+       this.targets = null;
+     }
+-    
+-    private void chooseTargets(BlockPlacementPolicy blockplacement,
++
++    abstract void chooseTargets(BlockPlacementPolicy blockplacement,
++        BlockStoragePolicySuite storagePolicySuite,
++        Set<Node> excludedNodes);
 +  }
 +
++  private static class ReplicationWork extends BlockRecoveryWork {
++    ReplicationWork(BlockInfo block,
++        BlockCollection bc,
++        DatanodeDescriptor[] srcNodes,
++        List<DatanodeDescriptor> containingNodes,
++        List<DatanodeStorageInfo> liveReplicaStorages,
++        int additionalReplRequired,
++        int priority) {
++      super(block, bc, srcNodes, containingNodes,
++          liveReplicaStorages, additionalReplRequired, priority);
++      LOG.debug("Creating a ReplicationWork to recover " + block);
++    }
++
++    @Override
++    void chooseTargets(BlockPlacementPolicy blockplacement,
++        BlockStoragePolicySuite storagePolicySuite,
++        Set<Node> excludedNodes) {
++      assert srcNodes.length > 0
++          : "At least 1 source node should have been selected";
++      try {
++        targets = blockplacement.chooseTarget(bc.getName(),
++            additionalReplRequired, srcNodes[0], liveReplicaStorages, false,
++            excludedNodes, block.getNumBytes(),
++            storagePolicySuite.getPolicy(bc.getStoragePolicyID()));
++      } finally {
++        srcNodes[0].decrementPendingReplicationWithoutTargets();
++      }
++    }
++  }
++
++  private static class ErasureCodingWork extends BlockRecoveryWork {
++    final short[] liveBlockIndicies;
++
++    ErasureCodingWork(BlockInfo block,
++        BlockCollection bc,
++        DatanodeDescriptor[] srcNodes,
++        List<DatanodeDescriptor> containingNodes,
++        List<DatanodeStorageInfo> liveReplicaStorages,
++        int additionalReplRequired,
++        int priority, short[] liveBlockIndicies) {
++      super(block, bc, srcNodes, containingNodes,
++          liveReplicaStorages, additionalReplRequired, priority);
++      this.liveBlockIndicies = liveBlockIndicies;
++      LOG.debug("Creating an ErasureCodingWork to recover " + block);
++    }
++
++    @Override
++    void chooseTargets(BlockPlacementPolicy blockplacement,
+         BlockStoragePolicySuite storagePolicySuite,
+         Set<Node> excludedNodes) {
+       try {
++        // TODO: new placement policy for EC considering multiple writers
+         targets = blockplacement.chooseTarget(bc.getName(),
+-            additionalReplRequired, srcNode, liveReplicaStorages, false,
++            additionalReplRequired, srcNodes[0], liveReplicaStorages, false,
+             excludedNodes, block.getNumBytes(),
+             storagePolicySuite.getPolicy(bc.getStoragePolicyID()));
+       } finally {
+-        srcNode.decrementPendingReplicationWithoutTargets();
+       }
+     }
+   }
+diff --git a/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/blockmanagement/DatanodeDescriptor.java b/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/blockmanagement/DatanodeDescriptor.java
+index 99def6b..10cf9ae 100644
+--- a/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/blockmanagement/DatanodeDescriptor.java
++++ b/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/blockmanagement/DatanodeDescriptor.java
+@@ -41,13 +41,16 @@
+ import org.apache.hadoop.hdfs.protocol.Block;
+ import org.apache.hadoop.hdfs.protocol.DatanodeID;
+ import org.apache.hadoop.hdfs.protocol.DatanodeInfo;
++import org.apache.hadoop.hdfs.protocol.ExtendedBlock;
+ import org.apache.hadoop.hdfs.server.namenode.CachedBlock;
++import org.apache.hadoop.hdfs.server.protocol.BlockECRecoveryCommand.BlockECRecoveryInfo;
+ import org.apache.hadoop.hdfs.server.protocol.BlockReportContext;
+ import org.apache.hadoop.hdfs.server.protocol.DatanodeStorage;
+ import org.apache.hadoop.hdfs.server.protocol.StorageReport;
+ import org.apache.hadoop.hdfs.server.protocol.VolumeFailureSummary;
+ import org.apache.hadoop.hdfs.util.EnumCounters;
+ import org.apache.hadoop.hdfs.util.LightWeightHashSet;
++import org.apache.hadoop.io.erasurecode.ECSchema;
+ import org.apache.hadoop.util.IntrusiveCollection;
+ import org.apache.hadoop.util.Time;
+ 
+@@ -218,7 +221,9 @@ public CachedBlocksList getPendingUncached() {
+   private long bandwidth;
+ 
+   /** A queue of blocks to be replicated by this datanode */
+-  private final BlockQueue<BlockTargetPair> replicateBlocks =
++  private final BlockQueue<BlockTargetPair> replicateBlocks = new BlockQueue<>();
++  /** A queue of blocks to be erasure coded by this datanode */
++  private final BlockQueue<BlockECRecoveryInfo> erasurecodeBlocks =
+       new BlockQueue<>();
+   /** A queue of blocks to be recovered by this datanode */
+   private final BlockQueue<BlockInfoUnderConstruction> recoverBlocks =
+@@ -377,6 +382,7 @@ public void clearBlockQueues() {
+       this.invalidateBlocks.clear();
+       this.recoverBlocks.clear();
+       this.replicateBlocks.clear();
++      this.erasurecodeBlocks.clear();
+     }
+     // pendingCached, cached, and pendingUncached are protected by the
+     // FSN lock.
+@@ -598,6 +604,20 @@ void addBlockToBeReplicated(Block block, DatanodeStorageInfo[] targets) {
+   }
+ 
    /**
-    * Write checksums to this packet
-    *
-@@ -121,7 +135,7 @@ synchronized void writeData(byte[] inarray, int off, int len)
-    * @param len the length of checksums to write
-    * @throws ClosedChannelException
++   * Store block erasure coding work.
++   */
++  void addBlockToBeErasureCoded(ExtendedBlock block,
++      DatanodeDescriptor[] sources, DatanodeStorageInfo[] targets,
++      short[] liveBlockIndices, ECSchema ecSchema, int cellSize) {
++    assert (block != null && sources != null && sources.length > 0);
++    BlockECRecoveryInfo task = new BlockECRecoveryInfo(block, sources, targets,
++        liveBlockIndices, ecSchema, cellSize);
++    erasurecodeBlocks.offer(task);
++    BlockManager.LOG.debug("Adding block recovery task " + task + "to "
++        + getName() + ", current queue size is " + erasurecodeBlocks.size());
++  }
++
++  /**
+    * Store block recovery work.
     */
--  synchronized void writeChecksum(byte[] inarray, int off, int len)
-+  public synchronized void writeChecksum(byte[] inarray, int off, int len)
-       throws ClosedChannelException {
-     checkBuffer();
-     if (len == 0) {
-@@ -140,7 +154,7 @@ synchronized void writeChecksum(byte[] inarray, int off, int len)
-    * @param stm
-    * @throws IOException
-    */
--  synchronized void writeTo(DataOutputStream stm) throws IOException {
-+  public synchronized void writeTo(DataOutputStream stm) throws IOException {
-     checkBuffer();
- 
-     final int dataLen = dataPos - dataStart;
-@@ -222,7 +236,7 @@ boolean isHeartbeatPacket() {
-    *
-    * @return true if the packet is the last packet
-    */
--  boolean isLastPacketInBlock(){
-+  boolean isLastPacketInBlock() {
-     return lastPacketInBlock;
-   }
- 
-@@ -231,7 +245,7 @@ boolean isLastPacketInBlock(){
-    *
-    * @return the sequence number of this packet
-    */
--  long getSeqno(){
-+  long getSeqno() {
-     return seqno;
-   }
- 
-@@ -240,14 +254,14 @@ long getSeqno(){
-    *
-    * @return the number of chunks in this packet
-    */
--  synchronized int getNumChunks(){
-+  synchronized int getNumChunks() {
-     return numChunks;
+   void addBlockToBeRecovered(BlockInfoUnderConstruction block) {
+@@ -629,6 +649,14 @@ int getNumberOfBlocksToBeReplicated() {
    }
  
    /**
-    * increase the number of chunks by one
++   * The number of work items that are pending to be replicated
++   */
++  @VisibleForTesting
++  public int getNumberOfBlocksToBeErasureCoded() {
++    return erasurecodeBlocks.size();
++  }
++  
++  /**
+    * The number of block invalidation items that are pending to 
+    * be sent to the datanode
     */
--  synchronized void incNumChunks(){
-+  synchronized void incNumChunks() {
-     numChunks++;
+@@ -642,6 +670,10 @@ int getNumberOfBlocksToBeInvalidated() {
+     return replicateBlocks.poll(maxTransfers);
    }
  
-@@ -256,7 +270,7 @@ synchronized void incNumChunks(){
-    *
-    * @return the maximum number of packets
-    */
--  int getMaxChunks(){
-+  int getMaxChunks() {
-     return maxChunks;
-   }
- 
-@@ -265,7 +279,7 @@ int getMaxChunks(){
-    *
-    * @param syncBlock if to sync block
-    */
--  synchronized void setSyncBlock(boolean syncBlock){
-+  synchronized void setSyncBlock(boolean syncBlock) {
-     this.syncBlock = syncBlock;
-   }
- 
-diff --git a/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/DFSStripedInputStream.java b/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/DFSStripedInputStream.java
++  public List<BlockECRecoveryInfo> getErasureCodeCommand(int maxTransfers) {
++    return erasurecodeBlocks.poll(maxTransfers);
++  }
++
+   public BlockInfoUnderConstruction[] getLeaseRecoveryCommand(
+       int maxTransfers) {
+     List<BlockInfoUnderConstruction> blocks = recoverBlocks.poll(maxTransfers);
+@@ -843,6 +875,10 @@ public String dumpDatanode() {
+     if (repl > 0) {
+       sb.append(" ").append(repl).append(" blocks to be replicated;");
+     }
++    int ec = erasurecodeBlocks.size();
++    if(ec > 0) {
++      sb.append(" ").append(ec).append(" blocks to be erasure coded;");
++    }
+     int inval = invalidateBlocks.size();
+     if (inval > 0) {
+       sb.append(" ").append(inval).append(" blocks to be invalidated;");      
+diff --git a/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/blockmanagement/DatanodeManager.java b/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/blockmanagement/DatanodeManager.java
+index 4266004..0a2f15b 100644
+--- a/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/blockmanagement/DatanodeManager.java
++++ b/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/blockmanagement/DatanodeManager.java
+@@ -39,6 +39,7 @@
+ import org.apache.hadoop.hdfs.server.namenode.NameNode;
+ import org.apache.hadoop.hdfs.server.namenode.Namesystem;
+ import org.apache.hadoop.hdfs.server.protocol.*;
++import org.apache.hadoop.hdfs.server.protocol.BlockECRecoveryCommand.BlockECRecoveryInfo;
+ import org.apache.hadoop.hdfs.server.protocol.BlockRecoveryCommand.RecoveringBlock;
+ import org.apache.hadoop.ipc.Server;
+ import org.apache.hadoop.net.*;
+@@ -1439,6 +1440,13 @@ private void setDatanodeDead(DatanodeDescriptor node) {
+           cmds.add(new BlockCommand(DatanodeProtocol.DNA_TRANSFER, blockPoolId,
+               pendingList));
+         }
++        // checking pending erasure coding tasks
++        List<BlockECRecoveryInfo> pendingECList =
++            nodeinfo.getErasureCodeCommand(maxTransfers);
++        if (pendingECList != null) {
++          cmds.add(new BlockECRecoveryCommand(DatanodeProtocol.DNA_ERASURE_CODING_RECOVERY,
++              pendingECList));
++        }
+         //check block invalidation
+         Block[] blks = nodeinfo.getInvalidateBlocks(blockInvalidateLimit);
+         if (blks != null) {
+diff --git a/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/protocol/BlockECRecoveryCommand.java b/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/protocol/BlockECRecoveryCommand.java
 new file mode 100644
-index 0000000..a71da93
+index 0000000..56a1546
 --- /dev/null
-+++ b/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/DFSStripedInputStream.java
-@@ -0,0 +1,913 @@
++++ b/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/protocol/BlockECRecoveryCommand.java
+@@ -0,0 +1,153 @@
 +/**
 + * Licensed to the Apache Software Foundation (ASF) under one
 + * or more contributor license agreements.  See the NOTICE file
@@ -796,2191 +869,468 @@ index 0000000..a71da93
 + * See the License for the specific language governing permissions and
 + * limitations under the License.
 + */
-+package org.apache.hadoop.hdfs;
++package org.apache.hadoop.hdfs.server.protocol;
 +
-+import com.google.common.base.Preconditions;
-+import org.apache.hadoop.fs.ChecksumException;
-+import org.apache.hadoop.fs.ReadOption;
++import com.google.common.base.Joiner;
++
++import org.apache.hadoop.classification.InterfaceAudience;
++import org.apache.hadoop.classification.InterfaceStability;
 +import org.apache.hadoop.fs.StorageType;
 +import org.apache.hadoop.hdfs.protocol.DatanodeInfo;
 +import org.apache.hadoop.hdfs.protocol.ExtendedBlock;
-+import org.apache.hadoop.hdfs.protocol.LocatedBlock;
-+import org.apache.hadoop.hdfs.protocol.LocatedBlocks;
-+import org.apache.hadoop.hdfs.protocol.LocatedStripedBlock;
-+import org.apache.hadoop.hdfs.protocol.datatransfer.InvalidEncryptionKeyException;
-+import org.apache.hadoop.hdfs.server.blockmanagement.BlockIdManager;
-+import org.apache.hadoop.hdfs.util.StripedBlockUtil;
-+import org.apache.hadoop.io.ByteBufferPool;
-+
-+import static org.apache.hadoop.hdfs.util.StripedBlockUtil.convertIndex4Decode;
-+import static org.apache.hadoop.hdfs.util.StripedBlockUtil.divideByteRangeIntoStripes;
-+import static org.apache.hadoop.hdfs.util.StripedBlockUtil.finalizeDecodeInputs;
-+import static org.apache.hadoop.hdfs.util.StripedBlockUtil.decodeAndFillBuffer;
-+import static org.apache.hadoop.hdfs.util.StripedBlockUtil.getNextCompletedStripedRead;
-+import static org.apache.hadoop.hdfs.util.StripedBlockUtil.getStartOffsetsForInternalBlocks;
-+import static org.apache.hadoop.hdfs.util.StripedBlockUtil.initDecodeInputs;
-+import static org.apache.hadoop.hdfs.util.StripedBlockUtil.parseStripedBlockGroup;
-+import static org.apache.hadoop.hdfs.util.StripedBlockUtil.AlignedStripe;
-+import static org.apache.hadoop.hdfs.util.StripedBlockUtil.StripingChunk;
-+import static org.apache.hadoop.hdfs.util.StripedBlockUtil.StripingChunkReadResult;
-+
-+import org.apache.hadoop.io.erasurecode.CodecUtil;
++import org.apache.hadoop.hdfs.server.blockmanagement.DatanodeStorageInfo;
 +import org.apache.hadoop.io.erasurecode.ECSchema;
 +
-+import org.apache.hadoop.io.erasurecode.rawcoder.RawErasureDecoder;
-+import org.apache.hadoop.net.NetUtils;
-+import org.apache.htrace.Span;
-+import org.apache.htrace.Trace;
-+import org.apache.htrace.TraceScope;
-+
-+import java.io.EOFException;
-+import java.io.IOException;
-+import java.io.InterruptedIOException;
-+import java.net.InetSocketAddress;
-+import java.nio.ByteBuffer;
 +import java.util.Arrays;
-+import java.util.EnumSet;
-+import java.util.Set;
 +import java.util.Collection;
-+import java.util.Map;
-+import java.util.HashMap;
-+import java.util.concurrent.CompletionService;
-+import java.util.concurrent.ConcurrentHashMap;
-+import java.util.concurrent.ExecutorCompletionService;
-+import java.util.concurrent.Callable;
-+import java.util.concurrent.Future;
 +
 +/**
-+ * DFSStripedInputStream reads from striped block groups
-+ */
-+public class DFSStripedInputStream extends DFSInputStream {
-+
-+  private static class ReaderRetryPolicy {
-+    private int fetchEncryptionKeyTimes = 1;
-+    private int fetchTokenTimes = 1;
-+
-+    void refetchEncryptionKey() {
-+      fetchEncryptionKeyTimes--;
-+    }
-+
-+    void refetchToken() {
-+      fetchTokenTimes--;
-+    }
-+
-+    boolean shouldRefetchEncryptionKey() {
-+      return fetchEncryptionKeyTimes > 0;
-+    }
-+
-+    boolean shouldRefetchToken() {
-+      return fetchTokenTimes > 0;
-+    }
-+  }
-+
-+  /** Used to indicate the buffered data's range in the block group */
-+  private static class StripeRange {
-+    /** start offset in the block group (inclusive) */
-+    final long offsetInBlock;
-+    /** length of the stripe range */
-+    final long length;
-+
-+    StripeRange(long offsetInBlock, long length) {
-+      Preconditions.checkArgument(offsetInBlock >= 0 && length >= 0);
-+      this.offsetInBlock = offsetInBlock;
-+      this.length = length;
-+    }
-+
-+    boolean include(long pos) {
-+      return pos >= offsetInBlock && pos < offsetInBlock + length;
-+    }
-+  }
-+
-+  private final BlockReader[] blockReaders;
-+  /**
-+   * when initializing block readers, their starting offsets are set to the same
-+   * number: the smallest internal block offsets among all the readers. This is
-+   * because it is possible that for some internal blocks we have to read
-+   * "backwards" for decoding purpose. We thus use this offset array to track
-+   * offsets for all the block readers so that we can skip data if necessary.
-+   */
-+  private final long[] blockReaderOffsets;
-+  private final DatanodeInfo[] currentNodes;
-+  private final int cellSize;
-+  private final short dataBlkNum;
-+  private final short parityBlkNum;
-+  private final int groupSize;
-+  /** the buffer for a complete stripe */
-+  private ByteBuffer curStripeBuf;
-+  private final ECSchema schema;
-+  private final RawErasureDecoder decoder;
-+
-+  /**
-+   * indicate the start/end offset of the current buffered stripe in the
-+   * block group
-+   */
-+  private StripeRange curStripeRange;
-+  private final CompletionService<Void> readingService;
-+  private ReaderRetryPolicy retry;
-+
-+  DFSStripedInputStream(DFSClient dfsClient, String src,
-+      boolean verifyChecksum, ECSchema schema, int cellSize,
-+      LocatedBlocks locatedBlocks) throws IOException {
-+    super(dfsClient, src, verifyChecksum, locatedBlocks);
-+
-+    assert schema != null;
-+    this.schema = schema;
-+    this.cellSize = cellSize;
-+    dataBlkNum = (short) schema.getNumDataUnits();
-+    parityBlkNum = (short) schema.getNumParityUnits();
-+    groupSize = dataBlkNum + parityBlkNum;
-+    blockReaders = new BlockReader[groupSize];
-+    blockReaderOffsets = new long[groupSize];
-+    currentNodes = new DatanodeInfo[groupSize];
-+    curStripeRange = new StripeRange(0, 0);
-+    readingService =
-+        new ExecutorCompletionService<>(dfsClient.getStripedReadsThreadPool());
-+    decoder = CodecUtil.createRSRawDecoder(dfsClient.getConfiguration(),
-+        dataBlkNum, parityBlkNum);
-+    if (DFSClient.LOG.isDebugEnabled()) {
-+      DFSClient.LOG.debug("Creating an striped input stream for file " + src);
-+    }
-+  }
-+
-+  private void resetCurStripeBuffer() {
-+    if (curStripeBuf == null) {
-+      curStripeBuf = ByteBuffer.allocateDirect(cellSize * dataBlkNum);
-+    }
-+    curStripeBuf.clear();
-+    curStripeRange = new StripeRange(0, 0);
-+  }
-+
-+  @Override
-+  public synchronized int read(final ByteBuffer buf) throws IOException {
-+    ReaderStrategy byteBufferReader = new ByteBufferStrategy(buf);
-+    TraceScope scope =
-+        dfsClient.getPathTraceScope("DFSInputStream#byteBufferRead", src);
-+    try {
-+      return readWithStrategy(byteBufferReader, 0, buf.remaining());
-+    } finally {
-+      scope.close();
-+    }
-+  }
-+
-+  /**
-+   * When seeking into a new block group, create blockReader for each internal
-+   * block in the group.
-+   */
-+  private synchronized void blockSeekTo(long target) throws IOException {
-+    if (target >= getFileLength()) {
-+      throw new IOException("Attempted to read past end of file");
-+    }
-+
-+    // Will be getting a new BlockReader.
-+    closeCurrentBlockReaders();
-+
-+    // Compute desired striped block group
-+    LocatedStripedBlock targetBlockGroup = getBlockGroupAt(target);
-+    // Update current position
-+    this.pos = target;
-+    this.blockEnd = targetBlockGroup.getStartOffset() +
-+        targetBlockGroup.getBlockSize() - 1;
-+    currentLocatedBlock = targetBlockGroup;
-+
-+    final long offsetIntoBlockGroup = getOffsetInBlockGroup();
-+    LocatedBlock[] targetBlocks = parseStripedBlockGroup(
-+        targetBlockGroup, cellSize, dataBlkNum, parityBlkNum);
-+    // The purpose is to get start offset into each block.
-+    long[] offsetsForInternalBlocks = getStartOffsetsForInternalBlocks(schema,
-+        cellSize, targetBlockGroup, offsetIntoBlockGroup);
-+    Preconditions.checkState(offsetsForInternalBlocks.length ==
-+        dataBlkNum + parityBlkNum);
-+    long minOffset = offsetsForInternalBlocks[dataBlkNum];
-+
-+    retry = new ReaderRetryPolicy();
-+    for (int i = 0; i < dataBlkNum; i++) {
-+      LocatedBlock targetBlock = targetBlocks[i];
-+      if (targetBlock != null) {
-+        DNAddrPair retval = getBestNodeDNAddrPair(targetBlock, null);
-+        if (retval != null) {
-+          currentNodes[i] = retval.info;
-+          blockReaders[i] = getBlockReaderWithRetry(targetBlock,
-+              minOffset, targetBlock.getBlockSize() - minOffset,
-+              retval.addr, retval.storageType, retval.info, target, retry);
-+          blockReaderOffsets[i] = minOffset;
-+        }
-+      }
-+    }
-+  }
-+
-+  private BlockReader getBlockReaderWithRetry(LocatedBlock targetBlock,
-+      long offsetInBlock, long length, InetSocketAddress targetAddr,
-+      StorageType storageType, DatanodeInfo datanode, long offsetInFile,
-+      ReaderRetryPolicy retry) throws IOException {
-+    // only need to get a new access token or a new encryption key once
-+    while (true) {
-+      try {
-+        return getBlockReader(targetBlock, offsetInBlock, length, targetAddr,
-+            storageType, datanode);
-+      } catch (IOException e) {
-+        if (e instanceof InvalidEncryptionKeyException &&
-+            retry.shouldRefetchEncryptionKey()) {
-+          DFSClient.LOG.info("Will fetch a new encryption key and retry, "
-+              + "encryption key was invalid when connecting to " + targetAddr
-+              + " : " + e);
-+          dfsClient.clearDataEncryptionKey();
-+          retry.refetchEncryptionKey();
-+        } else if (retry.shouldRefetchToken() &&
-+            tokenRefetchNeeded(e, targetAddr)) {
-+          fetchBlockAt(offsetInFile);
-+          retry.refetchToken();
-+        } else {
-+          DFSClient.LOG.warn("Failed to connect to " + targetAddr + " for block"
-+              + ", add to deadNodes and continue.", e);
-+          // Put chosen node into dead list, continue
-+          addToDeadNodes(datanode);
-+          return null;
-+        }
-+      }
-+    }
-+  }
-+
-+  /**
-+   * Extend the super method with the logic of switching between cells.
-+   * When reaching the end of a cell, proceed to the next cell and read it
-+   * with the next blockReader.
-+   */
-+  @Override
-+  protected void closeCurrentBlockReaders() {
-+    resetCurStripeBuffer();
-+    if (blockReaders ==  null || blockReaders.length == 0) {
-+      return;
-+    }
-+    for (int i = 0; i < groupSize; i++) {
-+      closeReader(i);
-+      currentNodes[i] = null;
-+    }
-+    blockEnd = -1;
-+  }
-+
-+  private void closeReader(int index) {
-+    if (blockReaders[index] != null) {
-+      try {
-+        blockReaders[index].close();
-+      } catch (IOException e) {
-+        DFSClient.LOG.error("error closing blockReader " + index, e);
-+      }
-+      blockReaders[index] = null;
-+    }
-+    blockReaderOffsets[index] = 0;
-+  }
-+
-+  private long getOffsetInBlockGroup() {
-+    return getOffsetInBlockGroup(pos);
-+  }
-+
-+  private long getOffsetInBlockGroup(long pos) {
-+    return pos - currentLocatedBlock.getStartOffset();
-+  }
-+
-+  /**
-+   * Read a new stripe covering the current position, and store the data in the
-+   * {@link #curStripeBuf}.
-+   */
-+  private void readOneStripe(
-+      Map<ExtendedBlock, Set<DatanodeInfo>> corruptedBlockMap)
-+      throws IOException {
-+    resetCurStripeBuffer();
-+
-+    // compute stripe range based on pos
-+    final long offsetInBlockGroup = getOffsetInBlockGroup();
-+    final long stripeLen = cellSize * dataBlkNum;
-+    final int stripeIndex = (int) (offsetInBlockGroup / stripeLen);
-+    final int stripeBufOffset = (int) (offsetInBlockGroup % stripeLen);
-+    final int stripeLimit = (int) Math.min(currentLocatedBlock.getBlockSize()
-+        - (stripeIndex * stripeLen), stripeLen);
-+    curStripeRange = new StripeRange(offsetInBlockGroup,
-+        stripeLimit - stripeBufOffset);
-+
-+    LocatedStripedBlock blockGroup = (LocatedStripedBlock) currentLocatedBlock;
-+    AlignedStripe[] stripes = StripedBlockUtil.divideOneStripe(schema, cellSize,
-+        blockGroup, offsetInBlockGroup,
-+        offsetInBlockGroup + curStripeRange.length - 1, curStripeBuf);
-+    // TODO handle null elements in blks (e.g., NN does not know locations for
-+    // all the internal blocks)
-+    final LocatedBlock[] blks = StripedBlockUtil.parseStripedBlockGroup(
-+        blockGroup, cellSize, dataBlkNum, parityBlkNum);
-+    // read the whole stripe
-+    for (AlignedStripe stripe : stripes) {
-+      // Parse group to get chosen DN location
-+      StripeReader sreader = new StatefulStripeReader(readingService, stripe,
-+          blks);
-+      sreader.readStripe(blks, corruptedBlockMap);
-+    }
-+    curStripeBuf.position(stripeBufOffset);
-+    curStripeBuf.limit(stripeLimit);
-+  }
-+
-+  private Callable<Void> readCell(final BlockReader reader,
-+      final DatanodeInfo datanode, final long currentReaderOffset,
-+      final long targetReaderOffset, final ByteBufferStrategy strategy,
-+      final int targetLength, final ExtendedBlock currentBlock,
-+      final Map<ExtendedBlock, Set<DatanodeInfo>> corruptedBlockMap) {
-+    return new Callable<Void>() {
-+      @Override
-+      public Void call() throws Exception {
-+        // reader can be null if getBlockReaderWithRetry failed or
-+        // the reader hit exception before
-+        if (reader == null) {
-+          throw new IOException("The BlockReader is null. " +
-+              "The BlockReader creation failed or the reader hit exception.");
-+        }
-+        Preconditions.checkState(currentReaderOffset <= targetReaderOffset);
-+        if (currentReaderOffset < targetReaderOffset) {
-+          long skipped = reader.skip(targetReaderOffset - currentReaderOffset);
-+          Preconditions.checkState(
-+              skipped == targetReaderOffset - currentReaderOffset);
-+        }
-+        int result = 0;
-+        while (result < targetLength) {
-+          int ret = readToBuffer(reader, datanode, strategy, currentBlock,
-+              corruptedBlockMap);
-+          if (ret < 0) {
-+            throw new IOException("Unexpected EOS from the reader");
-+          }
-+          result += ret;
-+        }
-+        updateReadStatistics(readStatistics, targetLength, reader);
-+        return null;
-+      }
-+    };
-+  }
-+
-+  private int readToBuffer(BlockReader blockReader,
-+      DatanodeInfo currentNode, ByteBufferStrategy readerStrategy,
-+      ExtendedBlock currentBlock,
-+      Map<ExtendedBlock, Set<DatanodeInfo>> corruptedBlockMap)
-+      throws IOException {
-+    try {
-+      return readerStrategy.doRead(blockReader, 0, 0);
-+    } catch (ChecksumException ce) {
-+      DFSClient.LOG.warn("Found Checksum error for "
-+          + currentBlock + " from " + currentNode
-+          + " at " + ce.getPos());
-+      // we want to remember which block replicas we have tried
-+      addIntoCorruptedBlockMap(currentBlock, currentNode,
-+          corruptedBlockMap);
-+      throw ce;
-+    } catch (IOException e) {
-+      DFSClient.LOG.warn("Exception while reading from "
-+          + currentBlock + " of " + src + " from "
-+          + currentNode, e);
-+      throw e;
-+    }
-+  }
-+
-+  /**
-+   * Seek to a new arbitrary location
-+   */
-+  @Override
-+  public synchronized void seek(long targetPos) throws IOException {
-+    if (targetPos > getFileLength()) {
-+      throw new EOFException("Cannot seek after EOF");
-+    }
-+    if (targetPos < 0) {
-+      throw new EOFException("Cannot seek to negative offset");
-+    }
-+    if (closed.get()) {
-+      throw new IOException("Stream is closed!");
-+    }
-+    if (targetPos <= blockEnd) {
-+      final long targetOffsetInBlk = getOffsetInBlockGroup(targetPos);
-+      if (curStripeRange.include(targetOffsetInBlk)) {
-+        int bufOffset = getStripedBufOffset(targetOffsetInBlk);
-+        curStripeBuf.position(bufOffset);
-+        pos = targetPos;
-+        return;
-+      }
-+    }
-+    pos = targetPos;
-+    blockEnd = -1;
-+  }
-+
-+  private int getStripedBufOffset(long offsetInBlockGroup) {
-+    final long stripeLen = cellSize * dataBlkNum;
-+    // compute the position in the curStripeBuf based on "pos"
-+    return (int) (offsetInBlockGroup % stripeLen);
-+  }
-+
-+  @Override
-+  public synchronized boolean seekToNewSource(long targetPos)
-+      throws IOException {
-+    return false;
-+  }
-+
-+  @Override
-+  protected synchronized int readWithStrategy(ReaderStrategy strategy,
-+      int off, int len) throws IOException {
-+    dfsClient.checkOpen();
-+    if (closed.get()) {
-+      throw new IOException("Stream closed");
-+    }
-+    Map<ExtendedBlock, Set<DatanodeInfo>> corruptedBlockMap =
-+        new ConcurrentHashMap<>();
-+    failures = 0;
-+    if (pos < getFileLength()) {
-+      try {
-+        if (pos > blockEnd) {
-+          blockSeekTo(pos);
-+        }
-+        int realLen = (int) Math.min(len, (blockEnd - pos + 1L));
-+        synchronized (infoLock) {
-+          if (locatedBlocks.isLastBlockComplete()) {
-+            realLen = (int) Math.min(realLen,
-+                locatedBlocks.getFileLength() - pos);
-+          }
-+        }
-+
-+        /** Number of bytes already read into buffer */
-+        int result = 0;
-+        while (result < realLen) {
-+          if (!curStripeRange.include(getOffsetInBlockGroup())) {
-+            readOneStripe(corruptedBlockMap);
-+          }
-+          int ret = copyToTargetBuf(strategy, off + result, realLen - result);
-+          result += ret;
-+          pos += ret;
-+        }
-+        if (dfsClient.stats != null) {
-+          dfsClient.stats.incrementBytesRead(result);
-+        }
-+        return result;
-+      } finally {
-+        // Check if need to report block replicas corruption either read
-+        // was successful or ChecksumException occured.
-+        reportCheckSumFailure(corruptedBlockMap,
-+            currentLocatedBlock.getLocations().length);
-+      }
-+    }
-+    return -1;
-+  }
-+
-+  /**
-+   * Copy the data from {@link #curStripeBuf} into the given buffer
-+   * @param strategy the ReaderStrategy containing the given buffer
-+   * @param offset the offset of the given buffer. Used only when strategy is
-+   *               a ByteArrayStrategy
-+   * @param length target length
-+   * @return number of bytes copied
-+   */
-+  private int copyToTargetBuf(ReaderStrategy strategy, int offset, int length) {
-+    final long offsetInBlk = getOffsetInBlockGroup();
-+    int bufOffset = getStripedBufOffset(offsetInBlk);
-+    curStripeBuf.position(bufOffset);
-+    return strategy.copyFrom(curStripeBuf, offset,
-+        Math.min(length, curStripeBuf.remaining()));
-+  }
-+
-+  /**
-+   * The super method {@link DFSInputStream#refreshLocatedBlock} refreshes
-+   * cached LocatedBlock by executing {@link DFSInputStream#getBlockAt} again.
-+   * This method extends the logic by first remembering the index of the
-+   * internal block, and re-parsing the refreshed block group with the same
-+   * index.
-+   */
-+  @Override
-+  protected LocatedBlock refreshLocatedBlock(LocatedBlock block)
-+      throws IOException {
-+    int idx = BlockIdManager.getBlockIndex(block.getBlock().getLocalBlock());
-+    LocatedBlock lb = getBlockGroupAt(block.getStartOffset());
-+    // If indexing information is returned, iterate through the index array
-+    // to find the entry for position idx in the group
-+    LocatedStripedBlock lsb = (LocatedStripedBlock) lb;
-+    int i = 0;
-+    for (; i < lsb.getBlockIndices().length; i++) {
-+      if (lsb.getBlockIndices()[i] == idx) {
-+        break;
-+      }
-+    }
-+    if (DFSClient.LOG.isDebugEnabled()) {
-+      DFSClient.LOG.debug("refreshLocatedBlock for striped blocks, offset="
-+          + block.getStartOffset() + ". Obtained block " + lb + ", idx=" + idx);
-+    }
-+    return StripedBlockUtil.constructInternalBlock(
-+        lsb, i, cellSize, dataBlkNum, idx);
-+  }
-+
-+  private LocatedStripedBlock getBlockGroupAt(long offset) throws IOException {
-+    LocatedBlock lb = super.getBlockAt(offset);
-+    assert lb instanceof LocatedStripedBlock : "NameNode" +
-+        " should return a LocatedStripedBlock for a striped file";
-+    return (LocatedStripedBlock)lb;
-+  }
-+
-+  /**
-+   * Real implementation of pread.
-+   */
-+  @Override
-+  protected void fetchBlockByteRange(LocatedBlock block, long start,
-+      long end, byte[] buf, int offset,
-+      Map<ExtendedBlock, Set<DatanodeInfo>> corruptedBlockMap)
-+      throws IOException {
-+    // Refresh the striped block group
-+    LocatedStripedBlock blockGroup = getBlockGroupAt(block.getStartOffset());
-+
-+    AlignedStripe[] stripes = divideByteRangeIntoStripes(schema, cellSize,
-+        blockGroup, start, end, buf, offset);
-+    CompletionService<Void> readService = new ExecutorCompletionService<>(
-+        dfsClient.getStripedReadsThreadPool());
-+    // TODO handle null elements in blks (e.g., NN does not know locations for
-+    // all the internal blocks)
-+    final LocatedBlock[] blks = StripedBlockUtil.parseStripedBlockGroup(
-+        blockGroup, cellSize, dataBlkNum, parityBlkNum);
-+    for (AlignedStripe stripe : stripes) {
-+      // Parse group to get chosen DN location
-+      StripeReader preader = new PositionStripeReader(readService, stripe);
-+      preader.readStripe(blks, corruptedBlockMap);
-+    }
-+  }
-+
-+  private Callable<Void> getFromOneDataNode(final DNAddrPair datanode,
-+      final LocatedBlock block, final long start, final long end,
-+      final byte[] buf, final int[] offsets, final int[] lengths,
-+      final Map<ExtendedBlock, Set<DatanodeInfo>> corruptedBlockMap,
-+      final int hedgedReadId) {
-+    final Span parentSpan = Trace.currentSpan();
-+    return new Callable<Void>() {
-+      @Override
-+      public Void call() throws Exception {
-+        TraceScope scope =
-+            Trace.startSpan("Parallel reading " + hedgedReadId, parentSpan);
-+        try {
-+          actualGetFromOneDataNode(datanode, block, start,
-+              end, buf, offsets, lengths, corruptedBlockMap);
-+        } finally {
-+          scope.close();
-+        }
-+        return null;
-+      }
-+    };
-+  }
-+
-+  private abstract class StripeReader {
-+    final Map<Future<Void>, Integer> futures = new HashMap<>();
-+    final AlignedStripe alignedStripe;
-+    final CompletionService<Void> service;
-+
-+    StripeReader(CompletionService<Void> service, AlignedStripe alignedStripe) {
-+      this.service = service;
-+      this.alignedStripe = alignedStripe;
-+    }
-+
-+    /** submit reading chunk task */
-+    abstract void readChunk(final CompletionService<Void> service,
-+        final LocatedBlock block, int chunkIndex,
-+        Map<ExtendedBlock, Set<DatanodeInfo>> corruptedBlockMap);
-+
-+    /**
-+     * When seeing first missing block, initialize decode input buffers.
-+     * Also prepare the reading for data blocks outside of the reading range.
-+     */
-+    abstract void prepareDecodeInputs() throws IOException;
-+
-+    /**
-+     * Prepare reading for one more parity chunk.
-+     */
-+    abstract void prepareParityChunk() throws IOException;
-+
-+    abstract void decode();
-+
-+    abstract void updateState4SuccessRead(StripingChunkReadResult result);
-+
-+    /** read the whole stripe. do decoding if necessary */
-+    void readStripe(LocatedBlock[] blocks,
-+        Map<ExtendedBlock, Set<DatanodeInfo>> corruptedBlockMap)
-+        throws IOException {
-+      assert alignedStripe.getSpanInBlock() > 0;
-+      for (short i = 0; i < dataBlkNum; i++) {
-+        if (alignedStripe.chunks[i] != null
-+            && alignedStripe.chunks[i].state != StripingChunk.ALLZERO) {
-+          readChunk(service, blocks[i], i, corruptedBlockMap);
-+        }
-+      }
-+
-+      // Input buffers for potential decode operation, which remains null until
-+      // first read failure
-+      while (!futures.isEmpty()) {
-+        try {
-+          StripingChunkReadResult r = getNextCompletedStripedRead(service,
-+              futures, 0);
-+          if (DFSClient.LOG.isDebugEnabled()) {
-+            DFSClient.LOG.debug("Read task returned: " + r + ", for stripe "
-+                + alignedStripe);
-+          }
-+          StripingChunk returnedChunk = alignedStripe.chunks[r.index];
-+          Preconditions.checkNotNull(returnedChunk);
-+          Preconditions.checkState(returnedChunk.state == StripingChunk.PENDING);
-+
-+          if (r.state == StripingChunkReadResult.SUCCESSFUL) {
-+            returnedChunk.state = StripingChunk.FETCHED;
-+            alignedStripe.fetchedChunksNum++;
-+            updateState4SuccessRead(r);
-+            if (alignedStripe.fetchedChunksNum == dataBlkNum) {
-+              clearFutures(futures.keySet());
-+              break;
-+            }
-+          } else {
-+            returnedChunk.state = StripingChunk.MISSING;
-+            alignedStripe.missingChunksNum++;
-+            if (alignedStripe.missingChunksNum > parityBlkNum) {
-+              clearFutures(futures.keySet());
-+              throw new IOException("Too many blocks are missing: "
-+                  + alignedStripe);
-+            }
-+
-+            prepareDecodeInputs();
-+            prepareParityChunk();
-+            // close the corresponding reader
-+            closeReader(r.index);
-+
-+            for (int i = 0; i < alignedStripe.chunks.length; i++) {
-+              StripingChunk chunk = alignedStripe.chunks[i];
-+              if (chunk != null && chunk.state == StripingChunk.REQUESTED) {
-+                readChunk(service, blocks[i], i, corruptedBlockMap);
-+              }
-+            }
-+          }
-+        } catch (InterruptedException ie) {
-+          String err = "Read request interrupted";
-+          DFSClient.LOG.error(err);
-+          clearFutures(futures.keySet());
-+          // Don't decode if read interrupted
-+          throw new InterruptedIOException(err);
-+        }
-+      }
-+
-+      if (alignedStripe.missingChunksNum > 0) {
-+        decode();
-+      }
-+    }
-+  }
-+
-+  class PositionStripeReader extends StripeReader {
-+    private byte[][] decodeInputs = null;
-+
-+    PositionStripeReader(CompletionService<Void> service,
-+        AlignedStripe alignedStripe) {
-+      super(service, alignedStripe);
-+    }
-+
-+    @Override
-+    void readChunk(final CompletionService<Void> service,
-+        final LocatedBlock block, int chunkIndex,
-+        Map<ExtendedBlock, Set<DatanodeInfo>> corruptedBlockMap) {
-+      DatanodeInfo loc = block.getLocations()[0];
-+      StorageType type = block.getStorageTypes()[0];
-+      DNAddrPair dnAddr = new DNAddrPair(loc, NetUtils.createSocketAddr(
-+          loc.getXferAddr(dfsClient.getConf().isConnectToDnViaHostname())),
-+          type);
-+      StripingChunk chunk = alignedStripe.chunks[chunkIndex];
-+      chunk.state = StripingChunk.PENDING;
-+      Callable<Void> readCallable = getFromOneDataNode(dnAddr,
-+          block, alignedStripe.getOffsetInBlock(),
-+          alignedStripe.getOffsetInBlock() + alignedStripe.getSpanInBlock() - 1,
-+          chunk.byteArray.buf(), chunk.byteArray.getOffsets(),
-+          chunk.byteArray.getLengths(), corruptedBlockMap, chunkIndex);
-+      Future<Void> getFromDNRequest = service.submit(readCallable);
-+      if (DFSClient.LOG.isDebugEnabled()) {
-+        DFSClient.LOG.debug("Submitting striped read request for " + chunkIndex
-+            + ". Info of the block: " + block + ", offset in block is "
-+            + alignedStripe.getOffsetInBlock() + ", end is "
-+            + (alignedStripe.getOffsetInBlock()
-+            + alignedStripe.getSpanInBlock() - 1));
-+      }
-+      futures.put(getFromDNRequest, chunkIndex);
-+    }
-+
-+    @Override
-+    void updateState4SuccessRead(StripingChunkReadResult r) {}
-+
-+    @Override
-+    void prepareDecodeInputs() {
-+      if (decodeInputs == null) {
-+        decodeInputs = initDecodeInputs(alignedStripe, dataBlkNum, parityBlkNum);
-+      }
-+    }
-+
-+    @Override
-+    void prepareParityChunk() {
-+      for (int i = dataBlkNum; i < dataBlkNum + parityBlkNum; i++) {
-+        if (alignedStripe.chunks[i] == null) {
-+          final int decodeIndex = convertIndex4Decode(i,
-+              dataBlkNum, parityBlkNum);
-+          alignedStripe.chunks[i] =
-+              new StripingChunk(decodeInputs[decodeIndex]);
-+          alignedStripe.chunks[i].addByteArraySlice(0,
-+              (int) alignedStripe.getSpanInBlock());
-+          break;
-+        }
-+      }
-+    }
-+
-+    @Override
-+    void decode() {
-+      finalizeDecodeInputs(decodeInputs, dataBlkNum, parityBlkNum,
-+          alignedStripe);
-+      decodeAndFillBuffer(decodeInputs, alignedStripe, dataBlkNum,
-+          parityBlkNum, decoder);
-+    }
-+  }
-+
-+  class StatefulStripeReader extends StripeReader {
-+    ByteBuffer[] decodeInputs;
-+    final LocatedBlock[] targetBlocks;
-+
-+    StatefulStripeReader(CompletionService<Void> service,
-+        AlignedStripe alignedStripe, LocatedBlock[] targetBlocks) {
-+      super(service, alignedStripe);
-+      this.targetBlocks = targetBlocks;
-+    }
-+
-+    @Override
-+    void readChunk(final CompletionService<Void> service,
-+        final LocatedBlock block, int chunkIndex, Map<ExtendedBlock,
-+        Set<DatanodeInfo>> corruptedBlockMap) {
-+      StripingChunk chunk = alignedStripe.chunks[chunkIndex];
-+      chunk.state = StripingChunk.PENDING;
-+      ByteBufferStrategy strategy = new ByteBufferStrategy(chunk.byteBuffer);
-+      Callable<Void> readCallable = readCell(blockReaders[chunkIndex],
-+          currentNodes[chunkIndex], blockReaderOffsets[chunkIndex],
-+          alignedStripe.getOffsetInBlock(), strategy,
-+          chunk.byteBuffer.remaining(), block.getBlock(), corruptedBlockMap);
-+      Future<Void> request = readingService.submit(readCallable);
-+      futures.put(request, chunkIndex);
-+    }
-+
-+    @Override
-+    void updateState4SuccessRead(StripingChunkReadResult result) {
-+      Preconditions.checkArgument(
-+          result.state == StripingChunkReadResult.SUCCESSFUL);
-+      blockReaderOffsets[result.index] =
-+          alignedStripe.getOffsetInBlock() + alignedStripe.getSpanInBlock();
-+    }
-+
-+    @Override
-+    void prepareDecodeInputs() throws IOException {
-+      if (decodeInputs == null) {
-+        decodeInputs = new ByteBuffer[dataBlkNum + parityBlkNum];
-+        ByteBuffer cur = curStripeBuf.duplicate();
-+        StripedBlockUtil.VerticalRange range = alignedStripe.range;
-+        for (int i = 0; i < dataBlkNum; i++) {
-+          cur.limit(cur.capacity());
-+          int pos = (int) (range.offsetInBlock % cellSize + cellSize * i);
-+          cur.position(pos);
-+          cur.limit((int) (pos + range.spanInBlock));
-+          final int decodeIndex = convertIndex4Decode(i, dataBlkNum,
-+              parityBlkNum);
-+          decodeInputs[decodeIndex] = cur.slice();
-+          if (alignedStripe.chunks[i] == null) {
-+            alignedStripe.chunks[i] =
-+                new StripingChunk(decodeInputs[decodeIndex]);
-+          }
-+        }
-+      }
-+    }
-+
-+    @Override
-+    void prepareParityChunk() throws IOException {
-+      for (int i = dataBlkNum; i < dataBlkNum + parityBlkNum; i++) {
-+        if (alignedStripe.chunks[i] == null) {
-+          final int decodeIndex = convertIndex4Decode(i, dataBlkNum,
-+              parityBlkNum);
-+          decodeInputs[decodeIndex] = ByteBuffer.allocateDirect(
-+              (int) alignedStripe.range.spanInBlock);
-+          alignedStripe.chunks[i] =
-+              new StripingChunk(decodeInputs[decodeIndex]);
-+          if (blockReaders[i] == null) {
-+            prepareParityBlockReader(i);
-+          }
-+          break;
-+        }
-+      }
-+    }
-+
-+    private void prepareParityBlockReader(int i) throws IOException {
-+      // prepare the block reader for the parity chunk
-+      LocatedBlock targetBlock = targetBlocks[i];
-+      if (targetBlock != null) {
-+        final long offsetInBlock = alignedStripe.getOffsetInBlock();
-+        DNAddrPair retval = getBestNodeDNAddrPair(targetBlock, null);
-+        if (retval != null) {
-+          currentNodes[i] = retval.info;
-+          blockReaders[i] = getBlockReaderWithRetry(targetBlock,
-+              offsetInBlock, targetBlock.getBlockSize() - offsetInBlock,
-+              retval.addr, retval.storageType, retval.info,
-+              DFSStripedInputStream.this.getPos(), retry);
-+          blockReaderOffsets[i] = offsetInBlock;
-+        }
-+      }
-+    }
-+
-+    @Override
-+    void decode() {
-+      // TODO no copy for data chunks. this depends on HADOOP-12047 for some
-+      // decoders to work
-+      final int span = (int) alignedStripe.getSpanInBlock();
-+      for (int i = 0; i < alignedStripe.chunks.length; i++) {
-+        final int decodeIndex = convertIndex4Decode(i,
-+            dataBlkNum, parityBlkNum);
-+        if (alignedStripe.chunks[i] != null &&
-+            alignedStripe.chunks[i].state == StripingChunk.ALLZERO) {
-+          for (int j = 0; j < span; j++) {
-+            decodeInputs[decodeIndex].put((byte) 0);
-+          }
-+          decodeInputs[decodeIndex].flip();
-+        } else if (alignedStripe.chunks[i] != null &&
-+            alignedStripe.chunks[i].state == StripingChunk.FETCHED) {
-+          decodeInputs[decodeIndex].position(0);
-+          decodeInputs[decodeIndex].limit(span);
-+        }
-+      }
-+      int[] decodeIndices = new int[parityBlkNum];
-+      int pos = 0;
-+      for (int i = 0; i < alignedStripe.chunks.length; i++) {
-+        if (alignedStripe.chunks[i] != null &&
-+            alignedStripe.chunks[i].state == StripingChunk.MISSING) {
-+          decodeIndices[pos++] = convertIndex4Decode(i,
-+              dataBlkNum, parityBlkNum);
-+        }
-+      }
-+      decodeIndices = Arrays.copyOf(decodeIndices, pos);
-+
-+      final int decodeChunkNum = decodeIndices.length;
-+      ByteBuffer[] outputs = new ByteBuffer[decodeChunkNum];
-+      for (int i = 0; i < decodeChunkNum; i++) {
-+        outputs[i] = decodeInputs[decodeIndices[i]];
-+        outputs[i].position(0);
-+        outputs[i].limit((int) alignedStripe.range.spanInBlock);
-+        decodeInputs[decodeIndices[i]] = null;
-+      }
-+
-+      decoder.decode(decodeInputs, decodeIndices, outputs);
-+    }
-+  }
-+
-+  /**
-+   * May need online read recovery, zero-copy read doesn't make
-+   * sense, so don't support it.
-+   */
-+  @Override
-+  public synchronized ByteBuffer read(ByteBufferPool bufferPool,
-+      int maxLength, EnumSet<ReadOption> opts)
-+          throws IOException, UnsupportedOperationException {
-+    throw new UnsupportedOperationException(
-+        "Not support enhanced byte buffer access.");
-+  }
-+
-+  @Override
-+  public synchronized void releaseBuffer(ByteBuffer buffer) {
-+    throw new UnsupportedOperationException(
-+        "Not support enhanced byte buffer access.");
-+  }
-+
-+  /** A variation to {@link DFSInputStream#cancelAll} */
-+  private void clearFutures(Collection<Future<Void>> futures) {
-+    for (Future<Void> future : futures) {
-+      future.cancel(false);
-+    }
-+    futures.clear();
-+  }
-+}
-diff --git a/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/DFSStripedOutputStream.java b/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/DFSStripedOutputStream.java
-new file mode 100644
-index 0000000..cd7f6d4
---- /dev/null
-+++ b/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/DFSStripedOutputStream.java
-@@ -0,0 +1,667 @@
-+/**
-+ * Licensed to the Apache Software Foundation (ASF) under one
-+ * or more contributor license agreements.  See the NOTICE file
-+ * distributed with this work for additional information
-+ * regarding copyright ownership.  The ASF licenses this file
-+ * to you under the Apache License, Version 2.0 (the
-+ * "License"); you may not use this file except in compliance
-+ * with the License.  You may obtain a copy of the License at
++ * A BlockECRecoveryCommand is an instruction to a DataNode to reconstruct a
++ * striped block group with missing blocks.
 + *
-+ *     http://www.apache.org/licenses/LICENSE-2.0
++ * Upon receiving this command, the DataNode pulls data from other DataNodes
++ * hosting blocks in this group and reconstructs the lost blocks through codec
++ * calculation.
 + *
-+ * Unless required by applicable law or agreed to in writing, software
-+ * distributed under the License is distributed on an "AS IS" BASIS,
-+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-+ * See the License for the specific language governing permissions and
-+ * limitations under the License.
-+ */
-+package org.apache.hadoop.hdfs;
-+
-+import java.io.IOException;
-+import java.io.InterruptedIOException;
-+import java.nio.ByteBuffer;
-+import java.nio.channels.ClosedChannelException;
-+import java.util.ArrayList;
-+import java.util.Arrays;
-+import java.util.Collections;
-+import java.util.EnumSet;
-+import java.util.List;
-+import java.util.concurrent.BlockingQueue;
-+import java.util.concurrent.LinkedBlockingQueue;
-+
-+import org.apache.hadoop.HadoopIllegalArgumentException;
-+import org.apache.hadoop.classification.InterfaceAudience;
-+import org.apache.hadoop.fs.CreateFlag;
-+import org.apache.hadoop.hdfs.client.impl.DfsClientConf;
-+import org.apache.hadoop.hdfs.protocol.ExtendedBlock;
-+import org.apache.hadoop.hdfs.protocol.HdfsFileStatus;
-+import org.apache.hadoop.hdfs.protocol.LocatedBlock;
-+import org.apache.hadoop.io.MultipleIOException;
-+import org.apache.hadoop.io.erasurecode.CodecUtil;
-+import org.apache.hadoop.io.erasurecode.ECSchema;
-+import org.apache.hadoop.io.erasurecode.rawcoder.RawErasureEncoder;
-+import org.apache.hadoop.util.DataChecksum;
-+import org.apache.hadoop.util.Progressable;
-+import org.apache.htrace.Sampler;
-+import org.apache.htrace.Trace;
-+import org.apache.htrace.TraceScope;
-+
-+import com.google.common.base.Preconditions;
-+
-+
-+/**
-+ * This class supports writing files in striped layout and erasure coded format.
-+ * Each stripe contains a sequence of cells.
++ * After the reconstruction, the DataNode pushes the reconstructed blocks to
++ * their final destinations if necessary (e.g., the destination is different
++ * from the reconstruction node, or multiple blocks in a group are to be
++ * reconstructed).
 + */
 +@InterfaceAudience.Private
-+public class DFSStripedOutputStream extends DFSOutputStream {
-+  static class MultipleBlockingQueue<T> {
-+    private final List<BlockingQueue<T>> queues;
-+
-+    MultipleBlockingQueue(int numQueue, int queueSize) {
-+      queues = new ArrayList<>(numQueue);
-+      for (int i = 0; i < numQueue; i++) {
-+        queues.add(new LinkedBlockingQueue<T>(queueSize));
-+      }
-+    }
-+
-+    boolean isEmpty() {
-+      for(int i = 0; i < queues.size(); i++) {
-+        if (!queues.get(i).isEmpty()) {
-+          return false;
-+        }
-+      }
-+      return true;
-+    }
-+
-+    int numQueues() {
-+      return queues.size();
-+    }
-+
-+    void offer(int i, T object) {
-+      final boolean b = queues.get(i).offer(object);
-+      Preconditions.checkState(b, "Failed to offer " + object
-+          + " to queue, i=" + i);
-+    }
-+
-+    T take(int i) throws InterruptedIOException {
-+      try {
-+        return queues.get(i).take();
-+      } catch(InterruptedException ie) {
-+        throw DFSUtil.toInterruptedIOException("take interrupted, i=" + i, ie);
-+      }
-+    }
-+
-+    T poll(int i) {
-+      return queues.get(i).poll();
-+    }
-+
-+    T peek(int i) {
-+      return queues.get(i).peek();
-+    }
-+  }
-+
-+  /** Coordinate the communication between the streamers. */
-+  class Coordinator {
-+    private final MultipleBlockingQueue<LocatedBlock> followingBlocks;
-+    private final MultipleBlockingQueue<ExtendedBlock> endBlocks;
-+
-+    private final MultipleBlockingQueue<LocatedBlock> newBlocks;
-+    private final MultipleBlockingQueue<ExtendedBlock> updateBlocks;
-+
-+    Coordinator(final DfsClientConf conf, final int numDataBlocks,
-+        final int numAllBlocks) {
-+      followingBlocks = new MultipleBlockingQueue<>(numAllBlocks, 1);
-+      endBlocks = new MultipleBlockingQueue<>(numDataBlocks, 1);
-+
-+      newBlocks = new MultipleBlockingQueue<>(numAllBlocks, 1);
-+      updateBlocks = new MultipleBlockingQueue<>(numAllBlocks, 1);
-+    }
-+
-+    MultipleBlockingQueue<LocatedBlock> getFollowingBlocks() {
-+      return followingBlocks;
-+    }
-+
-+    MultipleBlockingQueue<LocatedBlock> getNewBlocks() {
-+      return newBlocks;
-+    }
-+
-+    MultipleBlockingQueue<ExtendedBlock> getUpdateBlocks() {
-+      return updateBlocks;
-+    }
-+
-+    StripedDataStreamer getStripedDataStreamer(int i) {
-+      return DFSStripedOutputStream.this.getStripedDataStreamer(i);
-+    }
-+
-+    void offerEndBlock(int i, ExtendedBlock block) {
-+      endBlocks.offer(i, block);
-+    }
-+
-+    ExtendedBlock takeEndBlock(int i) throws InterruptedIOException {
-+      return endBlocks.take(i);
-+    }
-+
-+    boolean hasAllEndBlocks() {
-+      for(int i = 0; i < endBlocks.numQueues(); i++) {
-+        if (endBlocks.peek(i) == null) {
-+          return false;
-+        }
-+      }
-+      return true;
-+    }
-+
-+    void setBytesEndBlock(int i, long newBytes, ExtendedBlock block) {
-+      ExtendedBlock b = endBlocks.peek(i);
-+      if (b == null) {
-+        // streamer just has failed, put end block and continue
-+        b = block;
-+        offerEndBlock(i, b);
-+      }
-+      b.setNumBytes(newBytes);
-+    }
-+
-+    /** @return a block representing the entire block group. */
-+    ExtendedBlock getBlockGroup() {
-+      final StripedDataStreamer s0 = getStripedDataStreamer(0);
-+      final ExtendedBlock b0 = s0.getBlock();
-+      if (b0 == null) {
-+        return null;
-+      }
-+
-+      final boolean atBlockGroupBoundary = s0.getBytesCurBlock() == 0 && b0.getNumBytes() > 0;
-+      final ExtendedBlock block = new ExtendedBlock(b0);
-+      long numBytes = b0.getNumBytes();
-+      for (int i = 1; i < numDataBlocks; i++) {
-+        final StripedDataStreamer si = getStripedDataStreamer(i);
-+        final ExtendedBlock bi = si.getBlock();
-+        if (bi != null && bi.getGenerationStamp() > block.getGenerationStamp()) {
-+          block.setGenerationStamp(bi.getGenerationStamp());
-+        }
-+        numBytes += atBlockGroupBoundary? bi.getNumBytes(): si.getBytesCurBlock();
-+      }
-+      block.setNumBytes(numBytes);
-+      if (LOG.isDebugEnabled()) {
-+        LOG.debug("getBlockGroup: " + block + ", numBytes=" + block.getNumBytes());
-+      }
-+      return block;
-+    }
-+  }
-+
-+  /** Buffers for writing the data and parity cells of a stripe. */
-+  class CellBuffers {
-+    private final ByteBuffer[] buffers;
-+    private final byte[][] checksumArrays;
-+
-+    CellBuffers(int numParityBlocks) throws InterruptedException{
-+      if (cellSize % bytesPerChecksum != 0) {
-+        throw new HadoopIllegalArgumentException("Invalid values: "
-+            + DFSConfigKeys.DFS_BYTES_PER_CHECKSUM_KEY + " (="
-+            + bytesPerChecksum + ") must divide cell size (=" + cellSize + ").");
-+      }
-+
-+      checksumArrays = new byte[numParityBlocks][];
-+      final int size = getChecksumSize() * (cellSize / bytesPerChecksum);
-+      for (int i = 0; i < checksumArrays.length; i++) {
-+        checksumArrays[i] = new byte[size];
-+      }
-+
-+      buffers = new ByteBuffer[numAllBlocks];
-+      for (int i = 0; i < buffers.length; i++) {
-+        buffers[i] = ByteBuffer.wrap(byteArrayManager.newByteArray(cellSize));
-+      }
-+    }
-+
-+    private ByteBuffer[] getBuffers() {
-+      return buffers;
-+    }
-+
-+    byte[] getChecksumArray(int i) {
-+      return checksumArrays[i - numDataBlocks];
-+    }
-+
-+    private int addTo(int i, byte[] b, int off, int len) {
-+      final ByteBuffer buf = buffers[i];
-+      final int pos = buf.position() + len;
-+      Preconditions.checkState(pos <= cellSize);
-+      buf.put(b, off, len);
-+      return pos;
-+    }
-+
-+    private void clear() {
-+      for (int i = 0; i< numAllBlocks; i++) {
-+        buffers[i].clear();
-+        if (i >= numDataBlocks) {
-+          Arrays.fill(buffers[i].array(), (byte) 0);
-+        }
-+      }
-+    }
-+
-+    private void release() {
-+      for (int i = 0; i < numAllBlocks; i++) {
-+        byteArrayManager.release(buffers[i].array());
-+      }
-+    }
-+
-+    private void flipDataBuffers() {
-+      for (int i = 0; i < numDataBlocks; i++) {
-+        buffers[i].flip();
-+      }
-+    }
-+  }
-+
-+  private final Coordinator coordinator;
-+  private final CellBuffers cellBuffers;
-+  private final RawErasureEncoder encoder;
-+  private final List<StripedDataStreamer> streamers;
-+
-+  /** Size of each striping cell, must be a multiple of bytesPerChecksum */
-+  private final int cellSize;
-+  private final int numAllBlocks;
-+  private final int numDataBlocks;
-+
-+  @Override
-+  ExtendedBlock getBlock() {
-+    return coordinator.getBlockGroup();
-+  }
-+
-+  /** Construct a new output stream for creating a file. */
-+  DFSStripedOutputStream(DFSClient dfsClient, String src, HdfsFileStatus stat,
-+                         EnumSet<CreateFlag> flag, Progressable progress,
-+                         DataChecksum checksum, String[] favoredNodes)
-+                         throws IOException {
-+    super(dfsClient, src, stat, flag, progress, checksum, favoredNodes);
-+    if (LOG.isDebugEnabled()) {
-+      LOG.debug("Creating DFSStripedOutputStream for " + src);
-+    }
-+
-+    final ECSchema schema = stat.getECSchema();
-+    final int numParityBlocks = schema.getNumParityUnits();
-+    cellSize = stat.getStripeCellSize();
-+    numDataBlocks = schema.getNumDataUnits();
-+    numAllBlocks = numDataBlocks + numParityBlocks;
-+
-+    encoder = CodecUtil.createRSRawEncoder(dfsClient.getConfiguration(),
-+        numDataBlocks, numParityBlocks);
-+
-+    coordinator = new Coordinator(dfsClient.getConf(),
-+        numDataBlocks, numAllBlocks);
-+    try {
-+      cellBuffers = new CellBuffers(numParityBlocks);
-+    } catch (InterruptedException ie) {
-+      throw DFSUtil.toInterruptedIOException(
-+          "Failed to create cell buffers", ie);
-+    }
-+
-+    List<StripedDataStreamer> s = new ArrayList<>(numAllBlocks);
-+    for (short i = 0; i < numAllBlocks; i++) {
-+      StripedDataStreamer streamer = new StripedDataStreamer(stat,
-+          dfsClient, src, progress, checksum, cachingStrategy, byteArrayManager,
-+          favoredNodes, i, coordinator);
-+      s.add(streamer);
-+    }
-+    streamers = Collections.unmodifiableList(s);
-+    setCurrentStreamer(0);
-+  }
-+
-+  StripedDataStreamer getStripedDataStreamer(int i) {
-+    return streamers.get(i);
-+  }
-+
-+  int getCurrentIndex() {
-+    return getCurrentStreamer().getIndex();
-+  }
-+
-+  private synchronized StripedDataStreamer getCurrentStreamer() {
-+    return (StripedDataStreamer)streamer;
-+  }
-+
-+  private synchronized StripedDataStreamer setCurrentStreamer(int i) {
-+    streamer = streamers.get(i);
-+    return getCurrentStreamer();
-+  }
++@InterfaceStability.Evolving
++public class BlockECRecoveryCommand extends DatanodeCommand {
++  final Collection<BlockECRecoveryInfo> ecTasks;
 +
 +  /**
-+   * Encode the buffers, i.e. compute parities.
-+   *
-+   * @param buffers data buffers + parity buffers
++   * Create BlockECRecoveryCommand from a collection of
++   * {@link BlockECRecoveryInfo}, each representing a recovery task
 +   */
-+  private static void encode(RawErasureEncoder encoder, int numData,
-+      ByteBuffer[] buffers) {
-+    final ByteBuffer[] dataBuffers = new ByteBuffer[numData];
-+    final ByteBuffer[] parityBuffers = new ByteBuffer[buffers.length - numData];
-+    System.arraycopy(buffers, 0, dataBuffers, 0, dataBuffers.length);
-+    System.arraycopy(buffers, numData, parityBuffers, 0, parityBuffers.length);
-+
-+    encoder.encode(dataBuffers, parityBuffers);
-+  }
-+
-+
-+  private void checkStreamers() throws IOException {
-+    int count = 0;
-+    for(StripedDataStreamer s : streamers) {
-+      if (!s.isFailed()) {
-+        if (s.getBlock() != null) {
-+          s.getErrorState().initExternalError();
-+        }
-+        count++;
-+      }
-+    }
-+    if (LOG.isDebugEnabled()) {
-+      LOG.debug("checkStreamers: " + streamers);
-+      LOG.debug("count=" + count);
-+    }
-+    if (count < numDataBlocks) {
-+      throw new IOException("Failed: the number of remaining blocks = "
-+          + count + " < the number of data blocks = " + numDataBlocks);
-+    }
-+  }
-+
-+  private void handleStreamerFailure(String err,
-+                                     Exception e) throws IOException {
-+    LOG.warn("Failed: " + err + ", " + this, e);
-+    getCurrentStreamer().setFailed(true);
-+    checkStreamers();
-+    currentPacket = null;
-+  }
-+
-+  /**
-+   * Generate packets from a given buffer. This is only used for streamers
-+   * writing parity blocks.
-+   *
-+   * @param byteBuffer the given buffer to generate packets
-+   * @param checksumBuf the checksum buffer
-+   * @return packets generated
-+   * @throws IOException
-+   */
-+  private List<DFSPacket> generatePackets(
-+      ByteBuffer byteBuffer, byte[] checksumBuf) throws IOException{
-+    List<DFSPacket> packets = new ArrayList<>();
-+    assert byteBuffer.hasArray();
-+    getDataChecksum().calculateChunkedSums(byteBuffer.array(), 0,
-+        byteBuffer.remaining(), checksumBuf, 0);
-+    int ckOff = 0;
-+    while (byteBuffer.remaining() > 0) {
-+      DFSPacket p = createPacket(packetSize, chunksPerPacket,
-+          getCurrentStreamer().getBytesCurBlock(),
-+          getCurrentStreamer().getAndIncCurrentSeqno(), false);
-+      int maxBytesToPacket = p.getMaxChunks() * bytesPerChecksum;
-+      int toWrite = byteBuffer.remaining() > maxBytesToPacket ?
-+          maxBytesToPacket: byteBuffer.remaining();
-+      int ckLen = ((toWrite - 1) / bytesPerChecksum + 1) * getChecksumSize();
-+      p.writeChecksum(checksumBuf, ckOff, ckLen);
-+      ckOff += ckLen;
-+      p.writeData(byteBuffer, toWrite);
-+      getCurrentStreamer().incBytesCurBlock(toWrite);
-+      packets.add(p);
-+    }
-+    return packets;
-+  }
-+
-+  @Override
-+  protected synchronized void writeChunk(byte[] bytes, int offset, int len,
-+      byte[] checksum, int ckoff, int cklen) throws IOException {
-+    final int index = getCurrentIndex();
-+    final StripedDataStreamer current = getCurrentStreamer();
-+    final int pos = cellBuffers.addTo(index, bytes, offset, len);
-+    final boolean cellFull = pos == cellSize;
-+
-+    final long oldBytes = current.getBytesCurBlock();
-+    if (!current.isFailed()) {
-+      try {
-+        super.writeChunk(bytes, offset, len, checksum, ckoff, cklen);
-+
-+        // cell is full and current packet has not been enqueued,
-+        if (cellFull && currentPacket != null) {
-+          enqueueCurrentPacketFull();
-+        }
-+      } catch(Exception e) {
-+        handleStreamerFailure("offset=" + offset + ", length=" + len, e);
-+      }
-+    }
-+
-+    if (current.isFailed()) {
-+      final long newBytes = oldBytes + len;
-+      coordinator.setBytesEndBlock(index, newBytes, current.getBlock());
-+      current.setBytesCurBlock(newBytes);
-+    }
-+
-+    // Two extra steps are needed when a striping cell is full:
-+    // 1. Forward the current index pointer
-+    // 2. Generate parity packets if a full stripe of data cells are present
-+    if (cellFull) {
-+      int next = index + 1;
-+      //When all data cells in a stripe are ready, we need to encode
-+      //them and generate some parity cells. These cells will be
-+      //converted to packets and put to their DataStreamer's queue.
-+      if (next == numDataBlocks) {
-+        cellBuffers.flipDataBuffers();
-+        writeParityCells();
-+        next = 0;
-+      }
-+      setCurrentStreamer(next);
-+    }
-+  }
-+
-+  private int stripeDataSize() {
-+    return numDataBlocks * cellSize;
-+  }
-+
-+  @Override
-+  public void hflush() {
-+    throw new UnsupportedOperationException();
-+  }
-+
-+  @Override
-+  public void hsync() {
-+    throw new UnsupportedOperationException();
-+  }
-+
-+  @Override
-+  protected synchronized void start() {
-+    for (StripedDataStreamer streamer : streamers) {
-+      streamer.start();
-+    }
-+  }
-+
-+  @Override
-+  synchronized void abort() throws IOException {
-+    if (isClosed()) {
-+      return;
-+    }
-+    for (StripedDataStreamer streamer : streamers) {
-+      streamer.getLastException().set(new IOException("Lease timeout of "
-+          + (dfsClient.getConf().getHdfsTimeout()/1000) +
-+          " seconds expired."));
-+    }
-+    closeThreads(true);
-+    dfsClient.endFileLease(fileId);
-+  }
-+
-+  @Override
-+  boolean isClosed() {
-+    if (closed) {
-+      return true;
-+    }
-+    for(StripedDataStreamer s : streamers) {
-+      if (!s.streamerClosed()) {
-+        return false;
-+      }
-+    }
-+    return true;
-+  }
-+
-+  @Override
-+  protected void closeThreads(boolean force) throws IOException {
-+    final MultipleIOException.Builder b = new MultipleIOException.Builder();
-+    try {
-+      for (StripedDataStreamer streamer : streamers) {
-+        try {
-+          streamer.close(force);
-+          streamer.join();
-+          streamer.closeSocket();
-+        } catch (Exception e) {
-+          try {
-+            handleStreamerFailure("force=" + force, e);
-+          } catch (IOException ioe) {
-+            b.add(ioe);
-+          }
-+        } finally {
-+          streamer.setSocketToNull();
-+        }
-+      }
-+    } finally {
-+      setClosed();
-+    }
-+    final IOException ioe = b.build();
-+    if (ioe != null) {
-+      throw ioe;
-+    }
-+  }
-+
-+  /**
-+   * Simply add bytesCurBlock together. Note that this result is not accurately
-+   * the size of the block group.
-+   */
-+  private long getCurrentSumBytes() {
-+    long sum = 0;
-+    for (int i = 0; i < numDataBlocks; i++) {
-+      sum += streamers.get(i).getBytesCurBlock();
-+    }
-+    return sum;
-+  }
-+
-+  private void writeParityCellsForLastStripe() throws IOException {
-+    final long currentBlockGroupBytes = getCurrentSumBytes();
-+    if (currentBlockGroupBytes % stripeDataSize() == 0) {
-+      return;
-+    }
-+
-+    final int firstCellSize =
-+        (int)(getStripedDataStreamer(0).getBytesCurBlock() % cellSize);
-+    final int parityCellSize = firstCellSize > 0 && firstCellSize < cellSize?
-+        firstCellSize : cellSize;
-+    final ByteBuffer[] buffers = cellBuffers.getBuffers();
-+
-+    for (int i = 0; i < numAllBlocks; i++) {
-+      // Pad zero bytes to make all cells exactly the size of parityCellSize
-+      // If internal block is smaller than parity block, pad zero bytes.
-+      // Also pad zero bytes to all parity cells
-+      final int position = buffers[i].position();
-+      assert position <= parityCellSize : "If an internal block is smaller" +
-+          " than parity block, then its last cell should be small than last" +
-+          " parity cell";
-+      for (int j = 0; j < parityCellSize - position; j++) {
-+        buffers[i].put((byte) 0);
-+      }
-+      buffers[i].flip();
-+    }
-+
-+    writeParityCells();
-+  }
-+
-+  void writeParityCells() throws IOException {
-+    final ByteBuffer[] buffers = cellBuffers.getBuffers();
-+    //encode the data cells
-+    encode(encoder, numDataBlocks, buffers);
-+    for (int i = numDataBlocks; i < numAllBlocks; i++) {
-+      writeParity(i, buffers[i], cellBuffers.getChecksumArray(i));
-+    }
-+    cellBuffers.clear();
-+  }
-+
-+  void writeParity(int index, ByteBuffer buffer, byte[] checksumBuf
-+      ) throws IOException {
-+    final StripedDataStreamer current = setCurrentStreamer(index);
-+    final int len = buffer.limit();
-+
-+    final long oldBytes = current.getBytesCurBlock();
-+    if (!current.isFailed()) {
-+      try {
-+        for (DFSPacket p : generatePackets(buffer, checksumBuf)) {
-+          getCurrentStreamer().waitAndQueuePacket(p);
-+        }
-+        endBlock();
-+      } catch(Exception e) {
-+        handleStreamerFailure("oldBytes=" + oldBytes + ", len=" + len, e);
-+      }
-+    }
-+
-+    if (current.isFailed()) {
-+      final long newBytes = oldBytes + len;
-+      current.setBytesCurBlock(newBytes);
-+    }
-+  }
-+
-+  @Override
-+  void setClosed() {
-+    super.setClosed();
-+    for (int i = 0; i < numAllBlocks; i++) {
-+      streamers.get(i).release();
-+    }
-+    cellBuffers.release();
-+  }
-+
-+  @Override
-+  protected synchronized void closeImpl() throws IOException {
-+    if (isClosed()) {
-+      final MultipleIOException.Builder b = new MultipleIOException.Builder();
-+      for(int i = 0; i < streamers.size(); i++) {
-+        final StripedDataStreamer si = getStripedDataStreamer(i);
-+        try {
-+          si.getLastException().check(true);
-+        } catch (IOException e) {
-+          b.add(e);
-+        }
-+      }
-+      final IOException ioe = b.build();
-+      if (ioe != null) {
-+        throw ioe;
-+      }
-+      return;
-+    }
-+
-+    try {
-+      // flush from all upper layers
-+      try {
-+        flushBuffer();
-+        if (currentPacket != null) {
-+          enqueueCurrentPacket();
-+        }
-+      } catch(Exception e) {
-+        handleStreamerFailure("closeImpl", e);
-+      }
-+
-+      // if the last stripe is incomplete, generate and write parity cells
-+      writeParityCellsForLastStripe();
-+
-+      for (int i = 0; i < numAllBlocks; i++) {
-+        final StripedDataStreamer s = setCurrentStreamer(i);
-+        if (!s.isFailed()) {
-+          try {
-+            if (s.getBytesCurBlock() > 0) {
-+              setCurrentPacket2Empty();
-+            }
-+            // flush all data to Datanode
-+            flushInternal();
-+          } catch(Exception e) {
-+            handleStreamerFailure("closeImpl", e);
-+          }
-+        }
-+      }
-+
-+      closeThreads(false);
-+      final ExtendedBlock lastBlock = coordinator.getBlockGroup();
-+      TraceScope scope = Trace.startSpan("completeFile", Sampler.NEVER);
-+      try {
-+        completeFile(lastBlock);
-+      } finally {
-+        scope.close();
-+      }
-+      dfsClient.endFileLease(fileId);
-+    } catch (ClosedChannelException ignored) {
-+    } finally {
-+      setClosed();
-+    }
-+  }
-+}
-diff --git a/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/DFSUtil.java b/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/DFSUtil.java
-index cae56c0..c06a435 100644
---- a/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/DFSUtil.java
-+++ b/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/DFSUtil.java
-@@ -36,6 +36,7 @@
- import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_SERVER_HTTPS_TRUSTSTORE_PASSWORD_KEY;
- 
- import java.io.IOException;
-+import java.io.InterruptedIOException;
- import java.io.PrintStream;
- import java.io.UnsupportedEncodingException;
- import java.net.InetAddress;
-@@ -55,7 +56,6 @@
- 
- import javax.net.SocketFactory;
- 
--import com.google.common.collect.Sets;
- import org.apache.commons.cli.CommandLine;
- import org.apache.commons.cli.CommandLineParser;
- import org.apache.commons.cli.Option;
-@@ -96,6 +96,7 @@
- import com.google.common.base.Joiner;
- import com.google.common.base.Preconditions;
- import com.google.common.collect.Lists;
-+import com.google.common.collect.Sets;
- import com.google.protobuf.BlockingService;
- 
- @InterfaceAudience.Private
-@@ -1527,4 +1528,10 @@ public static boolean isHDFSEncryptionEnabled(Configuration conf) {
-         DFSConfigKeys.DFS_ENCRYPTION_KEY_PROVIDER_URI, "").isEmpty();
-   }
- 
-+  public static InterruptedIOException toInterruptedIOException(String message,
-+      InterruptedException e) {
-+    final InterruptedIOException iioe = new InterruptedIOException(message);
-+    iioe.initCause(e);
-+    return iioe;
-+  }
- }
-diff --git a/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/DataStreamer.java b/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/DataStreamer.java
-index 8dd85b7..c78199e 100644
---- a/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/DataStreamer.java
-+++ b/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/DataStreamer.java
-@@ -209,6 +209,7 @@ synchronized void throwException4Close() throws IOException {
- 
-   static class ErrorState {
-     private boolean error = false;
-+    private boolean externalError = false;
-     private int badNodeIndex = -1;
-     private int restartingNodeIndex = -1;
-     private long restartingNodeDeadline = 0;
-@@ -220,6 +221,7 @@ synchronized void throwException4Close() throws IOException {
- 
-     synchronized void reset() {
-       error = false;
-+      externalError = false;
-       badNodeIndex = -1;
-       restartingNodeIndex = -1;
-       restartingNodeDeadline = 0;
-@@ -229,14 +231,24 @@ synchronized boolean hasError() {
-       return error;
-     }
- 
-+    synchronized boolean hasExternalErrorOnly() {
-+      return error && externalError && !isNodeMarked();
-+    }
-+
-     synchronized boolean hasDatanodeError() {
--      return error && isNodeMarked();
-+      return error && (isNodeMarked() || externalError);
-     }
- 
-     synchronized void setError(boolean err) {
-       this.error = err;
-     }
- 
-+    synchronized void initExternalError() {
-+      setError(true);
-+      this.externalError = true;
-+    }
-+
-+
-     synchronized void setBadNodeIndex(int index) {
-       this.badNodeIndex = index;
-     }
-@@ -335,7 +347,7 @@ synchronized void checkRestartingNodeDeadline(DatanodeInfo[] nodes) {
-   }
- 
-   private volatile boolean streamerClosed = false;
--  private ExtendedBlock block; // its length is number of bytes acked
-+  protected ExtendedBlock block; // its length is number of bytes acked
-   private Token<BlockTokenIdentifier> accessToken;
-   private DataOutputStream blockStream;
-   private DataInputStream blockReplyStream;
-@@ -366,12 +378,12 @@ synchronized void checkRestartingNodeDeadline(DatanodeInfo[] nodes) {
-   private final LastExceptionInStreamer lastException = new LastExceptionInStreamer();
-   private Socket s;
- 
--  private final DFSClient dfsClient;
--  private final String src;
-+  protected final DFSClient dfsClient;
-+  protected final String src;
-   /** Only for DataTransferProtocol.writeBlock(..) */
-   private final DataChecksum checksum4WriteBlock;
-   private final Progressable progress;
--  private final HdfsFileStatus stat;
-+  protected final HdfsFileStatus stat;
-   // appending to existing partial block
-   private volatile boolean appendChunk = false;
-   // both dataQueue and ackQueue are protected by dataQueue lock
-@@ -397,11 +409,13 @@ synchronized void checkRestartingNodeDeadline(DatanodeInfo[] nodes) {
-   private final LoadingCache<DatanodeInfo, DatanodeInfo> excludedNodes;
-   private final String[] favoredNodes;
- 
--  private DataStreamer(HdfsFileStatus stat, DFSClient dfsClient, String src,
-+  private DataStreamer(HdfsFileStatus stat, ExtendedBlock block,
-+                       DFSClient dfsClient, String src,
-                        Progressable progress, DataChecksum checksum,
-                        AtomicReference<CachingStrategy> cachingStrategy,
-                        ByteArrayManager byteArrayManage,
-                        boolean isAppend, String[] favoredNodes) {
-+    this.block = block;
-     this.dfsClient = dfsClient;
-     this.src = src;
-     this.progress = progress;
-@@ -426,9 +440,8 @@ private DataStreamer(HdfsFileStatus stat, DFSClient dfsClient, String src,
-                String src, Progressable progress, DataChecksum checksum,
-                AtomicReference<CachingStrategy> cachingStrategy,
-                ByteArrayManager byteArrayManage, String[] favoredNodes) {
--    this(stat, dfsClient, src, progress, checksum, cachingStrategy,
-+    this(stat, block, dfsClient, src, progress, checksum, cachingStrategy,
-         byteArrayManage, false, favoredNodes);
--    this.block = block;
-     stage = BlockConstructionStage.PIPELINE_SETUP_CREATE;
-   }
- 
-@@ -442,10 +455,9 @@ private DataStreamer(HdfsFileStatus stat, DFSClient dfsClient, String src,
-                String src, Progressable progress, DataChecksum checksum,
-                AtomicReference<CachingStrategy> cachingStrategy,
-                ByteArrayManager byteArrayManage) throws IOException {
--    this(stat, dfsClient, src, progress, checksum, cachingStrategy,
-+    this(stat, lastBlock.getBlock(), dfsClient, src, progress, checksum, cachingStrategy,
-         byteArrayManage, true, null);
-     stage = BlockConstructionStage.PIPELINE_SETUP_APPEND;
--    block = lastBlock.getBlock();
-     bytesSent = block.getNumBytes();
-     accessToken = lastBlock.getBlockToken();
-   }
-@@ -488,7 +500,7 @@ private void initDataStreaming() {
-     stage = BlockConstructionStage.DATA_STREAMING;
-   }
- 
--  private void endBlock() {
-+  protected void endBlock() {
-     if(LOG.isDebugEnabled()) {
-       LOG.debug("Closing old block " + block);
-     }
-@@ -574,7 +586,7 @@ public void run() {
-         // get new block from namenode.
-         if (stage == BlockConstructionStage.PIPELINE_SETUP_CREATE) {
-           if(LOG.isDebugEnabled()) {
--            LOG.debug("Allocating new block");
-+            LOG.debug("Allocating new block " + this);
-           }
-           setPipeline(nextBlockOutputStream());
-           initDataStreaming();
-@@ -592,10 +604,7 @@ public void run() {
-         long lastByteOffsetInBlock = one.getLastByteOffsetBlock();
-         if (lastByteOffsetInBlock > stat.getBlockSize()) {
-           throw new IOException("BlockSize " + stat.getBlockSize() +
--              " is smaller than data size. " +
--              " Offset of packet in block " +
--              lastByteOffsetInBlock +
--              " Aborting file " + src);
-+              " < lastByteOffsetInBlock, " + this + ", " + one);
-         }
- 
-         if (one.isLastPacketInBlock()) {
-@@ -1069,6 +1078,10 @@ private boolean processDatanodeError() throws IOException {
-     if (!errorState.hasDatanodeError()) {
-       return false;
-     }
-+    if (errorState.hasExternalErrorOnly() && block == null) {
-+      // block is not yet initialized, handle external error later.
-+      return false;
-+    }
-     if (response != null) {
-       LOG.info("Error Recovery for " + block +
-           " waiting for responder to exit. ");
-@@ -1397,15 +1410,28 @@ private void failPacket4Testing() {
-   }
- 
-   LocatedBlock updateBlockForPipeline() throws IOException {
-+    return callUpdateBlockForPipeline(block);
-+  }
-+
-+  LocatedBlock callUpdateBlockForPipeline(ExtendedBlock newBlock) throws IOException {
-     return dfsClient.namenode.updateBlockForPipeline(
--        block, dfsClient.clientName);
-+        newBlock, dfsClient.clientName);
-+  }
-+
-+  static ExtendedBlock newBlock(ExtendedBlock b, final long newGS) {
-+    return new ExtendedBlock(b.getBlockPoolId(), b.getBlockId(),
-+        b.getNumBytes(), newGS);
-   }
- 
-   /** update pipeline at the namenode */
-   ExtendedBlock updatePipeline(long newGS) throws IOException {
--    final ExtendedBlock newBlock = new ExtendedBlock(
--        block.getBlockPoolId(), block.getBlockId(), block.getNumBytes(), newGS);
--    dfsClient.namenode.updatePipeline(dfsClient.clientName, block, newBlock,
-+    final ExtendedBlock newBlock = newBlock(block, newGS);
-+    return callUpdatePipeline(block, newBlock);
-+  }
-+
-+  ExtendedBlock callUpdatePipeline(ExtendedBlock oldBlock, ExtendedBlock newBlock)
-+      throws IOException {
-+    dfsClient.namenode.updatePipeline(dfsClient.clientName, oldBlock, newBlock,
-         nodes, storageIDs);
-     return newBlock;
-   }
-@@ -1738,6 +1764,10 @@ ExtendedBlock getBlock() {
-     return accessToken;
-   }
- 
-+  ErrorState getErrorState() {
-+    return errorState;
-+  }
-+
-   /**
-    * Put a packet to the data queue
-    *
-@@ -1750,7 +1780,7 @@ void queuePacket(DFSPacket packet) {
-       dataQueue.addLast(packet);
-       lastQueuedSeqno = packet.getSeqno();
-       if (LOG.isDebugEnabled()) {
--        LOG.debug("Queued packet " + packet.getSeqno());
-+        LOG.debug("Queued " + packet + ", " + this);
-       }
-       dataQueue.notifyAll();
-     }
-diff --git a/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/StripedDataStreamer.java b/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/StripedDataStreamer.java
-new file mode 100644
-index 0000000..a177796
---- /dev/null
-+++ b/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/StripedDataStreamer.java
-@@ -0,0 +1,237 @@
-+/**
-+ * Licensed to the Apache Software Foundation (ASF) under one
-+ * or more contributor license agreements.  See the NOTICE file
-+ * distributed with this work for additional information
-+ * regarding copyright ownership.  The ASF licenses this file
-+ * to you under the Apache License, Version 2.0 (the
-+ * "License"); you may not use this file except in compliance
-+ * with the License.  You may obtain a copy of the License at
-+ *
-+ *     http://www.apache.org/licenses/LICENSE-2.0
-+ *
-+ * Unless required by applicable law or agreed to in writing, software
-+ * distributed under the License is distributed on an "AS IS" BASIS,
-+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-+ * See the License for the specific language governing permissions and
-+ * limitations under the License.
-+ */
-+
-+package org.apache.hadoop.hdfs;
-+
-+import static org.apache.hadoop.hdfs.protocol.HdfsConstants.BLOCK_STRIPED_CELL_SIZE;
-+import static org.apache.hadoop.hdfs.protocol.HdfsConstants.NUM_DATA_BLOCKS;
-+import static org.apache.hadoop.hdfs.protocol.HdfsConstants.NUM_PARITY_BLOCKS;
-+
-+import java.io.IOException;
-+import java.util.concurrent.atomic.AtomicReference;
-+
-+import org.apache.hadoop.hdfs.DFSStripedOutputStream.Coordinator;
-+import org.apache.hadoop.hdfs.DFSStripedOutputStream.MultipleBlockingQueue;
-+import org.apache.hadoop.hdfs.protocol.DatanodeInfo;
-+import org.apache.hadoop.hdfs.protocol.ExtendedBlock;
-+import org.apache.hadoop.hdfs.protocol.HdfsFileStatus;
-+import org.apache.hadoop.hdfs.protocol.LocatedBlock;
-+import org.apache.hadoop.hdfs.protocol.LocatedStripedBlock;
-+import org.apache.hadoop.hdfs.server.datanode.CachingStrategy;
-+import org.apache.hadoop.hdfs.util.ByteArrayManager;
-+import org.apache.hadoop.hdfs.util.StripedBlockUtil;
-+import org.apache.hadoop.util.DataChecksum;
-+import org.apache.hadoop.util.Progressable;
-+
-+/**
-+ * This class extends {@link DataStreamer} to support writing striped blocks
-+ * to datanodes.
-+ * A {@link DFSStripedOutputStream} has multiple {@link StripedDataStreamer}s.
-+ * Whenever the streamers need to talk the namenode, only the fastest streamer
-+ * sends an rpc call to the namenode and then populates the result for the
-+ * other streamers.
-+ */
-+public class StripedDataStreamer extends DataStreamer {
-+  /**
-+   * This class is designed for multiple threads to share a
-+   * {@link MultipleBlockingQueue}. Initially, the queue is empty. The earliest
-+   * thread calling poll populates entries to the queue and the other threads
-+   * will wait for it. Once the entries are populated, all the threads can poll
-+   * their entries.
-+   *
-+   * @param <T> the queue entry type.
-+   */
-+  static abstract class ConcurrentPoll<T> {
-+    private final MultipleBlockingQueue<T> queue;
-+
-+    ConcurrentPoll(MultipleBlockingQueue<T> queue) {
-+      this.queue = queue;
-+    }
-+
-+    T poll(final int i) throws IOException {
-+      for(;;) {
-+        synchronized(queue) {
-+          final T polled = queue.poll(i);
-+          if (polled != null) { // already populated; return polled item.
-+            return polled;
-+          }
-+          if (isReady2Populate()) {
-+            populate();
-+            return queue.poll(i);
-+          }
-+        }
-+
-+        // sleep and then retry.
-+        try {
-+          Thread.sleep(100);
-+        } catch(InterruptedException ie) {
-+          throw DFSUtil.toInterruptedIOException(
-+              "Sleep interrupted during poll", ie);
-+        }
-+      }
-+    }
-+
-+    boolean isReady2Populate() {
-+      return queue.isEmpty();
-+    }
-+
-+    abstract void populate() throws IOException;
-+  }
-+
-+  private final Coordinator coordinator;
-+  private final int index;
-+  private volatile boolean failed;
-+
-+  StripedDataStreamer(HdfsFileStatus stat,
-+                      DFSClient dfsClient, String src,
-+                      Progressable progress, DataChecksum checksum,
-+                      AtomicReference<CachingStrategy> cachingStrategy,
-+                      ByteArrayManager byteArrayManage, String[] favoredNodes,
-+                      short index, Coordinator coordinator) {
-+    super(stat, null, dfsClient, src, progress, checksum, cachingStrategy,
-+        byteArrayManage, favoredNodes);
-+    this.index = index;
-+    this.coordinator = coordinator;
-+  }
-+
-+  int getIndex() {
-+    return index;
-+  }
-+
-+  void setFailed(boolean failed) {
-+    this.failed = failed;
-+  }
-+
-+  boolean isFailed() {
-+    return failed;
-+  }
-+
-+  private boolean isParityStreamer() {
-+    return index >= NUM_DATA_BLOCKS;
-+  }
-+
-+  @Override
-+  protected void endBlock() {
-+    if (!isParityStreamer()) {
-+      coordinator.offerEndBlock(index, block);
-+    }
-+    super.endBlock();
-+  }
-+
-+  @Override
-+  protected LocatedBlock locateFollowingBlock(final DatanodeInfo[] excludedNodes)
-+      throws IOException {
-+    final MultipleBlockingQueue<LocatedBlock> followingBlocks
-+        = coordinator.getFollowingBlocks();
-+    return new ConcurrentPoll<LocatedBlock>(followingBlocks) {
-+      @Override
-+      boolean isReady2Populate() {
-+        return super.isReady2Populate()
-+            && (block == null || coordinator.hasAllEndBlocks());
-+      }
-+
-+      @Override
-+      void populate() throws IOException {
-+        getLastException().check(false);
-+
-+        if (block != null) {
-+          // set numByte for the previous block group
-+          long bytes = 0;
-+          for (int i = 0; i < NUM_DATA_BLOCKS; i++) {
-+            final ExtendedBlock b = coordinator.takeEndBlock(i);
-+            StripedBlockUtil.checkBlocks(index, block, i, b);
-+            bytes += b.getNumBytes();
-+          }
-+          block.setNumBytes(bytes);
-+          block.setBlockId(block.getBlockId() - index);
-+        }
-+
-+        if (LOG.isDebugEnabled()) {
-+          LOG.debug("locateFollowingBlock: index=" + index + ", block=" + block);
-+        }
-+
-+        final LocatedBlock lb = StripedDataStreamer.super.locateFollowingBlock(
-+            excludedNodes);
-+        final LocatedBlock[] blocks = StripedBlockUtil.parseStripedBlockGroup(
-+            (LocatedStripedBlock)lb,
-+            BLOCK_STRIPED_CELL_SIZE, NUM_DATA_BLOCKS, NUM_PARITY_BLOCKS);
-+
-+        for (int i = 0; i < blocks.length; i++) {
-+          if (!coordinator.getStripedDataStreamer(i).isFailed()) {
-+            if (blocks[i] == null) {
-+              getLastException().set(
-+                  new IOException("Failed to get following block, i=" + i));
-+            } else {
-+              followingBlocks.offer(i, blocks[i]);
-+            }
-+          }
-+        }
-+      }
-+    }.poll(index);
-+  }
-+
-+  @Override
-+  LocatedBlock updateBlockForPipeline() throws IOException {
-+    final MultipleBlockingQueue<LocatedBlock> newBlocks
-+        = coordinator.getNewBlocks();
-+    return new ConcurrentPoll<LocatedBlock>(newBlocks) {
-+      @Override
-+      void populate() throws IOException {
-+        final ExtendedBlock bg = coordinator.getBlockGroup();
-+        final LocatedBlock updated = callUpdateBlockForPipeline(bg);
-+        final long newGS = updated.getBlock().getGenerationStamp();
-+        for (int i = 0; i < NUM_DATA_BLOCKS + NUM_PARITY_BLOCKS; i++) {
-+          final ExtendedBlock bi = coordinator.getStripedDataStreamer(i).getBlock();
-+          if (bi != null) {
-+            final LocatedBlock lb = new LocatedBlock(newBlock(bi, newGS),
-+                null, null, null, -1, updated.isCorrupt(), null);
-+            lb.setBlockToken(updated.getBlockToken());
-+            newBlocks.offer(i, lb);
-+          } else {
-+            final LocatedBlock lb = coordinator.getFollowingBlocks().peek(i);
-+            lb.getBlock().setGenerationStamp(newGS);
-+          }
-+        }
-+      }
-+    }.poll(index);
-+  }
-+
-+  @Override
-+  ExtendedBlock updatePipeline(final long newGS) throws IOException {
-+    final MultipleBlockingQueue<ExtendedBlock> updateBlocks
-+        = coordinator.getUpdateBlocks();
-+    return new ConcurrentPoll<ExtendedBlock>(updateBlocks) {
-+      @Override
-+      void populate() throws IOException {
-+        final ExtendedBlock bg = coordinator.getBlockGroup();
-+        final ExtendedBlock newBG = newBlock(bg, newGS);
-+        final ExtendedBlock updated = callUpdatePipeline(bg, newBG);
-+        for (int i = 0; i < NUM_DATA_BLOCKS + NUM_PARITY_BLOCKS; i++) {
-+          final ExtendedBlock bi = coordinator.getStripedDataStreamer(i).getBlock();
-+          updateBlocks.offer(i, newBlock(bi, updated.getGenerationStamp()));
-+        }
-+      }
-+    }.poll(index);
++  public BlockECRecoveryCommand(int action,
++      Collection<BlockECRecoveryInfo> blockECRecoveryInfoList) {
++    super(action);
++    this.ecTasks = blockECRecoveryInfoList;
 +  }
 +
 +  @Override
 +  public String toString() {
-+    return "#" + index + ": failed? " + Boolean.toString(failed).charAt(0)
-+        + ", " + super.toString();
-+  }
-+}
-diff --git a/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/client/impl/DfsClientConf.java b/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/client/impl/DfsClientConf.java
-index a257e32..9aef436 100644
---- a/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/client/impl/DfsClientConf.java
-+++ b/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/client/impl/DfsClientConf.java
-@@ -38,6 +38,7 @@
- import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_REPLICATION_DEFAULT;
- import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_REPLICATION_KEY;
- 
-+import com.google.common.base.Preconditions;
- import org.apache.commons.logging.Log;
- import org.apache.commons.logging.LogFactory;
- import org.apache.hadoop.HadoopIllegalArgumentException;
-@@ -101,6 +102,9 @@
-   private final long hedgedReadThresholdMillis;
-   private final int hedgedReadThreadpoolSize;
- 
-+  private final int stripedReadThreadpoolSize;
-+
-+
-   public DfsClientConf(Configuration conf) {
-     // The hdfsTimeout is currently the same as the ipc timeout 
-     hdfsTimeout = Client.getTimeout(conf);
-@@ -191,7 +195,7 @@ public DfsClientConf(Configuration conf) {
-     connectToDnViaHostname = conf.getBoolean(DFS_CLIENT_USE_DN_HOSTNAME,
-         DFS_CLIENT_USE_DN_HOSTNAME_DEFAULT);
-     hdfsBlocksMetadataEnabled = conf.getBoolean(
--        DFSConfigKeys.DFS_HDFS_BLOCKS_METADATA_ENABLED, 
-+        DFSConfigKeys.DFS_HDFS_BLOCKS_METADATA_ENABLED,
-         DFSConfigKeys.DFS_HDFS_BLOCKS_METADATA_ENABLED_DEFAULT);
-     fileBlockStorageLocationsNumThreads = conf.getInt(
-         DFSConfigKeys.DFS_CLIENT_FILE_BLOCK_STORAGE_LOCATIONS_NUM_THREADS,
-@@ -215,6 +219,13 @@ public DfsClientConf(Configuration conf) {
-     hedgedReadThreadpoolSize = conf.getInt(
-         HdfsClientConfigKeys.HedgedRead.THREADPOOL_SIZE_KEY,
-         HdfsClientConfigKeys.HedgedRead.THREADPOOL_SIZE_DEFAULT);
-+
-+    stripedReadThreadpoolSize = conf.getInt(
-+        HdfsClientConfigKeys.StripedRead.THREADPOOL_SIZE_KEY,
-+        HdfsClientConfigKeys.StripedRead.THREADPOOL_SIZE_DEFAULT);
-+    Preconditions.checkArgument(stripedReadThreadpoolSize > 0, "The value of " +
-+        HdfsClientConfigKeys.StripedRead.THREADPOOL_SIZE_KEY +
-+        " must be greater than 0.");
-   }
- 
-   private DataChecksum.Type getChecksumType(Configuration conf) {
-@@ -492,6 +503,13 @@ public int getHedgedReadThreadpoolSize() {
-   }
- 
-   /**
-+   * @return the stripedReadThreadpoolSize
-+   */
-+  public int getStripedReadThreadpoolSize() {
-+    return stripedReadThreadpoolSize;
++    StringBuilder sb = new StringBuilder();
++    sb.append("BlockECRecoveryCommand(\n  ");
++    Joiner.on("\n  ").appendTo(sb, ecTasks);
++    sb.append("\n)");
++    return sb.toString();
 +  }
 +
-+  /**
-    * @return the shortCircuitConf
-    */
-   public ShortCircuitConf getShortCircuitConf() {
-@@ -744,4 +762,4 @@ public String confAsString() {
-       return builder.toString();
-     }
-   }
--}
-\ No newline at end of file
-+}
-diff --git a/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/namenode/FSNamesystem.java b/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/namenode/FSNamesystem.java
-index 2762ca2..087e156 100644
---- a/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/namenode/FSNamesystem.java
-+++ b/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/namenode/FSNamesystem.java
-@@ -5523,11 +5523,17 @@ private void updatePipelineInternal(String clientName, ExtendedBlock oldBlock,
-         = (BlockInfoUnderConstruction)pendingFile.getLastBlock();
- 
-     // check new GS & length: this is not expected
--    if (newBlock.getGenerationStamp() <= blockinfo.getGenerationStamp() ||
--        newBlock.getNumBytes() < blockinfo.getNumBytes()) {
--      String msg = "Update " + oldBlock + " (len = " + 
--        blockinfo.getNumBytes() + ") to an older state: " + newBlock + 
--        " (len = " + newBlock.getNumBytes() +")";
-+    if (newBlock.getGenerationStamp() <= blockinfo.getGenerationStamp()) {
-+      final String msg = "Update " + oldBlock + " but the new block " + newBlock
-+          + " does not have a larger generation stamp than the last block "
-+          + blockinfo;
-+      LOG.warn(msg);
-+      throw new IOException(msg);
++  /** Block and targets pair */
++  @InterfaceAudience.Private
++  @InterfaceStability.Evolving
++  public static class BlockECRecoveryInfo {
++    private final ExtendedBlock block;
++    private final DatanodeInfo[] sources;
++    private DatanodeInfo[] targets;
++    private String[] targetStorageIDs;
++    private StorageType[] targetStorageTypes;
++    private final short[] liveBlockIndices;
++    private final ECSchema ecSchema;
++    private final int cellSize;
++
++    public BlockECRecoveryInfo(ExtendedBlock block, DatanodeInfo[] sources,
++        DatanodeStorageInfo[] targetDnStorageInfo, short[] liveBlockIndices,
++        ECSchema ecSchema, int cellSize) {
++      this(block, sources, DatanodeStorageInfo
++          .toDatanodeInfos(targetDnStorageInfo), DatanodeStorageInfo
++          .toStorageIDs(targetDnStorageInfo), DatanodeStorageInfo
++          .toStorageTypes(targetDnStorageInfo), liveBlockIndices, ecSchema,
++          cellSize);
 +    }
-+    if (newBlock.getNumBytes() < blockinfo.getNumBytes()) {
-+      final String msg = "Update " + oldBlock + " (size="
-+          + oldBlock.getNumBytes() + ") to a smaller size block " + newBlock
-+          + " (size=" + newBlock.getNumBytes() + ")";
-       LOG.warn(msg);
-       throw new IOException(msg);
-     }
-diff --git a/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/namenode/NameNodeRpcServer.java b/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/namenode/NameNodeRpcServer.java
-index 957c4e7..1037683 100644
---- a/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/namenode/NameNodeRpcServer.java
-+++ b/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/namenode/NameNodeRpcServer.java
-@@ -790,7 +790,7 @@ public void reportBadBlocks(LocatedBlock[] blocks) throws IOException {
-   public LocatedBlock updateBlockForPipeline(ExtendedBlock block, String clientName)
-       throws IOException {
-     checkNNStartup();
--    return namesystem.updateBlockForPipeline(block, clientName);
-+    return namesystem.bumpBlockGenerationStamp(block, clientName);
++
++    public BlockECRecoveryInfo(ExtendedBlock block, DatanodeInfo[] sources,
++        DatanodeInfo[] targets, String[] targetStorageIDs,
++        StorageType[] targetStorageTypes, short[] liveBlockIndices,
++        ECSchema ecSchema, int cellSize) {
++      this.block = block;
++      this.sources = sources;
++      this.targets = targets;
++      this.targetStorageIDs = targetStorageIDs;
++      this.targetStorageTypes = targetStorageTypes;
++      this.liveBlockIndices = liveBlockIndices;
++      this.ecSchema = ecSchema;
++      this.cellSize = cellSize;
++    }
++
++    public ExtendedBlock getExtendedBlock() {
++      return block;
++    }
++
++    public DatanodeInfo[] getSourceDnInfos() {
++      return sources;
++    }
++
++    public DatanodeInfo[] getTargetDnInfos() {
++      return targets;
++    }
++
++    public String[] getTargetStorageIDs() {
++      return targetStorageIDs;
++    }
++    
++    public StorageType[] getTargetStorageTypes() {
++      return targetStorageTypes;
++    }
++
++    public short[] getLiveBlockIndices() {
++      return liveBlockIndices;
++    }
++    
++    public ECSchema getECSchema() {
++      return ecSchema;
++    }
++
++    public int getCellSize() {
++      return cellSize;
++    }
++
++    @Override
++    public String toString() {
++      return new StringBuilder().append("BlockECRecoveryInfo(\n  ")
++          .append("Recovering ").append(block).append(" From: ")
++          .append(Arrays.asList(sources)).append(" To: [")
++          .append(Arrays.asList(targets)).append(")\n")
++          .append(" Block Indices: ").append(Arrays.asList(liveBlockIndices))
++          .toString();
++    }
++  }
++
++  public Collection<BlockECRecoveryInfo> getECTasks() {
++    return this.ecTasks;
++  }
++}
+diff --git a/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/protocol/DatanodeProtocol.java b/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/protocol/DatanodeProtocol.java
+index dfe0813..add4e73 100644
+--- a/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/protocol/DatanodeProtocol.java
++++ b/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/protocol/DatanodeProtocol.java
+@@ -76,6 +76,7 @@
+   final static int DNA_BALANCERBANDWIDTHUPDATE = 8; // update balancer bandwidth
+   final static int DNA_CACHE = 9;      // cache blocks
+   final static int DNA_UNCACHE = 10;   // uncache blocks
++  final static int DNA_ERASURE_CODING_RECOVERY = 11; // erasure coding recovery command
+ 
+   /** 
+    * Register Datanode.
+diff --git a/hadoop-hdfs-project/hadoop-hdfs/src/main/proto/DatanodeProtocol.proto b/hadoop-hdfs-project/hadoop-hdfs/src/main/proto/DatanodeProtocol.proto
+index b87e753..9d24b91 100644
+--- a/hadoop-hdfs-project/hadoop-hdfs/src/main/proto/DatanodeProtocol.proto
++++ b/hadoop-hdfs-project/hadoop-hdfs/src/main/proto/DatanodeProtocol.proto
+@@ -33,6 +33,7 @@ package hadoop.hdfs.datanode;
+ 
+ import "HAServiceProtocol.proto";
+ import "hdfs.proto";
++import "erasurecoding.proto";
+ 
+ /**
+  * Information to identify a datanode to a namenode
+@@ -58,6 +59,7 @@ message DatanodeCommandProto {
+     UnusedUpgradeCommand = 6;
+     NullDatanodeCommand = 7;
+     BlockIdCommand = 8;
++    BlockECRecoveryCommand = 9;
    }
  
+   required Type cmdType = 1;    // Type of the command
+@@ -71,6 +73,7 @@ message DatanodeCommandProto {
+   optional KeyUpdateCommandProto keyUpdateCmd = 6;
+   optional RegisterCommandProto registerCmd = 7;
+   optional BlockIdCommandProto blkIdCmd = 8;
++  optional BlockECRecoveryCommandProto blkECRecoveryCmd = 9;
+ }
  
-diff --git a/hadoop-hdfs-project/hadoop-hdfs/src/test/java/org/apache/hadoop/hdfs/BlockReaderTestUtil.java b/hadoop-hdfs-project/hadoop-hdfs/src/test/java/org/apache/hadoop/hdfs/BlockReaderTestUtil.java
-index 88b7f37..829cf03 100644
---- a/hadoop-hdfs-project/hadoop-hdfs/src/test/java/org/apache/hadoop/hdfs/BlockReaderTestUtil.java
-+++ b/hadoop-hdfs-project/hadoop-hdfs/src/test/java/org/apache/hadoop/hdfs/BlockReaderTestUtil.java
-@@ -165,20 +165,19 @@ public void readAndCheckEOS(BlockReader reader, int length, boolean expectEof)
+ /**
+@@ -145,6 +148,13 @@ message RegisterCommandProto {
+ }
+ 
+ /**
++ * Block Erasure coding recovery command
++ */
++message BlockECRecoveryCommandProto {
++  repeated BlockECRecoveryInfoProto blockECRecoveryinfo = 1;
++}
++
++/**
+  * registration - Information of the datanode registering with the namenode
+  */
+ message RegisterDatanodeRequestProto {
+diff --git a/hadoop-hdfs-project/hadoop-hdfs/src/main/proto/erasurecoding.proto b/hadoop-hdfs-project/hadoop-hdfs/src/main/proto/erasurecoding.proto
+index e656659..afdfd05 100644
+--- a/hadoop-hdfs-project/hadoop-hdfs/src/main/proto/erasurecoding.proto
++++ b/hadoop-hdfs-project/hadoop-hdfs/src/main/proto/erasurecoding.proto
+@@ -55,3 +55,17 @@ message GetErasureCodingZoneRequestProto {
+ message GetErasureCodingZoneResponseProto {
+   optional ErasureCodingZoneProto ECZone = 1;
+ }
++
++/**
++ * Block erasure coding recovery info
++ */
++message BlockECRecoveryInfoProto {
++  required ExtendedBlockProto block = 1;
++  required DatanodeInfosProto sourceDnInfos = 2;
++  required DatanodeInfosProto targetDnInfos = 3;
++  required StorageUuidsProto targetStorageUuids = 4;
++  required StorageTypesProto targetStorageTypes = 5;
++  repeated uint32 liveBlockIndices = 6;
++  required ECSchemaProto ecSchema = 7;
++  required uint32 cellSize = 8;
++}
+\ No newline at end of file
+diff --git a/hadoop-hdfs-project/hadoop-hdfs/src/test/java/org/apache/hadoop/hdfs/protocolPB/TestPBHelper.java b/hadoop-hdfs-project/hadoop-hdfs/src/test/java/org/apache/hadoop/hdfs/protocolPB/TestPBHelper.java
+index f995632..def161e 100644
+--- a/hadoop-hdfs-project/hadoop-hdfs/src/test/java/org/apache/hadoop/hdfs/protocolPB/TestPBHelper.java
++++ b/hadoop-hdfs-project/hadoop-hdfs/src/test/java/org/apache/hadoop/hdfs/protocolPB/TestPBHelper.java
+@@ -24,6 +24,7 @@
+ 
+ import java.util.ArrayList;
+ import java.util.Arrays;
++import java.util.Iterator;
+ import java.util.List;
+ 
+ import org.apache.hadoop.fs.permission.AclEntry;
+@@ -40,6 +41,7 @@
+ import org.apache.hadoop.hdfs.protocol.ExtendedBlock;
+ import org.apache.hadoop.hdfs.protocol.LocatedBlock;
+ import org.apache.hadoop.hdfs.protocol.proto.DatanodeProtocolProtos.BlockCommandProto;
++import org.apache.hadoop.hdfs.protocol.proto.DatanodeProtocolProtos.BlockECRecoveryCommandProto;
+ import org.apache.hadoop.hdfs.protocol.proto.DatanodeProtocolProtos.BlockRecoveryCommandProto;
+ import org.apache.hadoop.hdfs.protocol.proto.DatanodeProtocolProtos.DatanodeRegistrationProto;
+ import org.apache.hadoop.hdfs.protocol.proto.HdfsProtos;
+@@ -71,6 +73,8 @@
+ import org.apache.hadoop.hdfs.server.namenode.CheckpointSignature;
+ import org.apache.hadoop.hdfs.server.namenode.ErasureCodingSchemaManager;
+ import org.apache.hadoop.hdfs.server.protocol.BlockCommand;
++import org.apache.hadoop.hdfs.server.protocol.BlockECRecoveryCommand;
++import org.apache.hadoop.hdfs.server.protocol.BlockECRecoveryCommand.BlockECRecoveryInfo;
+ import org.apache.hadoop.hdfs.server.protocol.BlockRecoveryCommand;
+ import org.apache.hadoop.hdfs.server.protocol.BlockRecoveryCommand.RecoveringBlock;
+ import org.apache.hadoop.hdfs.server.protocol.BlocksWithLocations;
+@@ -643,4 +647,99 @@ public void testAclStatusProto() {
+         .build();
+     Assert.assertEquals(s, PBHelper.convert(PBHelper.convert(s)));
+   }
++
++  @Test
++  public void testBlockECRecoveryCommand() {
++    DatanodeInfo[] dnInfos0 = new DatanodeInfo[] {
++        DFSTestUtil.getLocalDatanodeInfo(), DFSTestUtil.getLocalDatanodeInfo() };
++    DatanodeStorageInfo targetDnInfos_0 = BlockManagerTestUtil
++        .newDatanodeStorageInfo(DFSTestUtil.getLocalDatanodeDescriptor(),
++            new DatanodeStorage("s00"));
++    DatanodeStorageInfo targetDnInfos_1 = BlockManagerTestUtil
++        .newDatanodeStorageInfo(DFSTestUtil.getLocalDatanodeDescriptor(),
++            new DatanodeStorage("s01"));
++    DatanodeStorageInfo[] targetDnInfos0 = new DatanodeStorageInfo[] {
++        targetDnInfos_0, targetDnInfos_1 };
++    short[] liveBlkIndices0 = new short[2];
++    BlockECRecoveryInfo blkECRecoveryInfo0 = new BlockECRecoveryInfo(
++        new ExtendedBlock("bp1", 1234), dnInfos0, targetDnInfos0,
++        liveBlkIndices0, ErasureCodingSchemaManager.getSystemDefaultSchema(),
++        64 * 1024);
++    DatanodeInfo[] dnInfos1 = new DatanodeInfo[] {
++        DFSTestUtil.getLocalDatanodeInfo(), DFSTestUtil.getLocalDatanodeInfo() };
++    DatanodeStorageInfo targetDnInfos_2 = BlockManagerTestUtil
++        .newDatanodeStorageInfo(DFSTestUtil.getLocalDatanodeDescriptor(),
++            new DatanodeStorage("s02"));
++    DatanodeStorageInfo targetDnInfos_3 = BlockManagerTestUtil
++        .newDatanodeStorageInfo(DFSTestUtil.getLocalDatanodeDescriptor(),
++            new DatanodeStorage("s03"));
++    DatanodeStorageInfo[] targetDnInfos1 = new DatanodeStorageInfo[] {
++        targetDnInfos_2, targetDnInfos_3 };
++    short[] liveBlkIndices1 = new short[2];
++    BlockECRecoveryInfo blkECRecoveryInfo1 = new BlockECRecoveryInfo(
++        new ExtendedBlock("bp2", 3256), dnInfos1, targetDnInfos1,
++        liveBlkIndices1, ErasureCodingSchemaManager.getSystemDefaultSchema(),
++        64 * 1024);
++    List<BlockECRecoveryInfo> blkRecoveryInfosList = new ArrayList<BlockECRecoveryInfo>();
++    blkRecoveryInfosList.add(blkECRecoveryInfo0);
++    blkRecoveryInfosList.add(blkECRecoveryInfo1);
++    BlockECRecoveryCommand blkECRecoveryCmd = new BlockECRecoveryCommand(
++        DatanodeProtocol.DNA_ERASURE_CODING_RECOVERY, blkRecoveryInfosList);
++    BlockECRecoveryCommandProto blkECRecoveryCmdProto = PBHelper
++        .convert(blkECRecoveryCmd);
++    blkECRecoveryCmd = PBHelper.convert(blkECRecoveryCmdProto);
++    Iterator<BlockECRecoveryInfo> iterator = blkECRecoveryCmd.getECTasks()
++        .iterator();
++    assertBlockECRecoveryInfoEquals(blkECRecoveryInfo0, iterator.next());
++    assertBlockECRecoveryInfoEquals(blkECRecoveryInfo1, iterator.next());
++  }
++
++  private void assertBlockECRecoveryInfoEquals(
++      BlockECRecoveryInfo blkECRecoveryInfo1,
++      BlockECRecoveryInfo blkECRecoveryInfo2) {
++    assertEquals(blkECRecoveryInfo1.getExtendedBlock(),
++        blkECRecoveryInfo2.getExtendedBlock());
++
++    DatanodeInfo[] sourceDnInfos1 = blkECRecoveryInfo1.getSourceDnInfos();
++    DatanodeInfo[] sourceDnInfos2 = blkECRecoveryInfo2.getSourceDnInfos();
++    assertDnInfosEqual(sourceDnInfos1, sourceDnInfos2);
++
++    DatanodeInfo[] targetDnInfos1 = blkECRecoveryInfo1.getTargetDnInfos();
++    DatanodeInfo[] targetDnInfos2 = blkECRecoveryInfo2.getTargetDnInfos();
++    assertDnInfosEqual(targetDnInfos1, targetDnInfos2);
++
++    String[] targetStorageIDs1 = blkECRecoveryInfo1.getTargetStorageIDs();
++    String[] targetStorageIDs2 = blkECRecoveryInfo2.getTargetStorageIDs();
++    assertEquals(targetStorageIDs1.length, targetStorageIDs2.length);
++    for (int i = 0; i < targetStorageIDs1.length; i++) {
++      assertEquals(targetStorageIDs1[i], targetStorageIDs2[i]);
++    }
++
++    short[] liveBlockIndices1 = blkECRecoveryInfo1.getLiveBlockIndices();
++    short[] liveBlockIndices2 = blkECRecoveryInfo2.getLiveBlockIndices();
++    for (int i = 0; i < liveBlockIndices1.length; i++) {
++      assertEquals(liveBlockIndices1[i], liveBlockIndices2[i]);
++    }
++
++    ECSchema ecSchema1 = blkECRecoveryInfo1.getECSchema();
++    ECSchema ecSchema2 = blkECRecoveryInfo2.getECSchema();
++    // Compare ECSchemas same as default ECSchema as we used system default
++    // ECSchema used in this test
++    compareECSchemas(ErasureCodingSchemaManager.getSystemDefaultSchema(), ecSchema1);
++    compareECSchemas(ErasureCodingSchemaManager.getSystemDefaultSchema(), ecSchema2);
++  }
++
++  private void compareECSchemas(ECSchema ecSchema1, ECSchema ecSchema2) {
++    assertEquals(ecSchema1.getSchemaName(), ecSchema2.getSchemaName());
++    assertEquals(ecSchema1.getNumDataUnits(), ecSchema2.getNumDataUnits());
++    assertEquals(ecSchema1.getNumParityUnits(), ecSchema2.getNumParityUnits());
++  }
++
++  private void assertDnInfosEqual(DatanodeInfo[] dnInfos1,
++      DatanodeInfo[] dnInfos2) {
++    assertEquals(dnInfos1.length, dnInfos2.length);
++    for (int i = 0; i < dnInfos1.length; i++) {
++      compare(dnInfos1[i], dnInfos2[i]);
++    }
++  }
+ }
+diff --git a/hadoop-hdfs-project/hadoop-hdfs/src/test/java/org/apache/hadoop/hdfs/server/blockmanagement/BlockManagerTestUtil.java b/hadoop-hdfs-project/hadoop-hdfs/src/test/java/org/apache/hadoop/hdfs/server/blockmanagement/BlockManagerTestUtil.java
+index 148135b..e25ee31 100644
+--- a/hadoop-hdfs-project/hadoop-hdfs/src/test/java/org/apache/hadoop/hdfs/server/blockmanagement/BlockManagerTestUtil.java
++++ b/hadoop-hdfs-project/hadoop-hdfs/src/test/java/org/apache/hadoop/hdfs/server/blockmanagement/BlockManagerTestUtil.java
+@@ -161,7 +161,7 @@ public static int computeInvalidationWork(BlockManager bm) {
     */
-   public BlockReader getBlockReader(LocatedBlock testBlock, int offset, int lenToRead)
-       throws IOException {
--    return getBlockReader(cluster, testBlock, offset, lenToRead);
-+    return getBlockReader(cluster.getFileSystem(), testBlock, offset, lenToRead);
+   public static int computeAllPendingWork(BlockManager bm) {
+     int work = computeInvalidationWork(bm);
+-    work += bm.computeReplicationWork(Integer.MAX_VALUE);
++    work += bm.computeBlockRecoveryWork(Integer.MAX_VALUE);
+     return work;
    }
  
-   /**
-    * Get a BlockReader for the given block.
-    */
--  public static BlockReader getBlockReader(MiniDFSCluster cluster,
--      LocatedBlock testBlock, int offset, int lenToRead) throws IOException {
-+  public static BlockReader getBlockReader(final DistributedFileSystem fs,
-+      LocatedBlock testBlock, int offset, long lenToRead) throws IOException {
-     InetSocketAddress targetAddr = null;
-     ExtendedBlock block = testBlock.getBlock();
-     DatanodeInfo[] nodes = testBlock.getLocations();
-     targetAddr = NetUtils.createSocketAddr(nodes[0].getXferAddr());
+diff --git a/hadoop-hdfs-project/hadoop-hdfs/src/test/java/org/apache/hadoop/hdfs/server/blockmanagement/TestBlockManager.java b/hadoop-hdfs-project/hadoop-hdfs/src/test/java/org/apache/hadoop/hdfs/server/blockmanagement/TestBlockManager.java
+index 9e31670..c53b77e 100644
+--- a/hadoop-hdfs-project/hadoop-hdfs/src/test/java/org/apache/hadoop/hdfs/server/blockmanagement/TestBlockManager.java
++++ b/hadoop-hdfs-project/hadoop-hdfs/src/test/java/org/apache/hadoop/hdfs/server/blockmanagement/TestBlockManager.java
+@@ -453,8 +453,8 @@ private BlockInfo addBlockOnNodes(long blockId, List<DatanodeDescriptor> nodes)
+     assertEquals("Block not initially pending replication", 0,
+         bm.pendingReplications.getNumReplicas(block));
+     assertEquals(
+-        "computeReplicationWork should indicate replication is needed", 1,
+-        bm.computeReplicationWorkForBlocks(list_all));
++        "computeBlockRecoveryWork should indicate replication is needed", 1,
++        bm.computeRecoveryWorkForBlocks(list_all));
+     assertTrue("replication is pending after work is computed",
+         bm.pendingReplications.getNumReplicas(block) > 0);
  
--    final DistributedFileSystem fs = cluster.getFileSystem();
-     return new BlockReaderFactory(fs.getClient().getConf()).
-       setInetSocketAddress(targetAddr).
-       setBlock(block).
+@@ -508,35 +508,38 @@ public void testHighestPriReplSrcChosenDespiteMaxReplLimit() throws Exception {
+     assertNotNull("Chooses source node for a highest-priority replication"
+         + " even if all available source nodes have reached their replication"
+         + " limits below the hard limit.",
+-        bm.chooseSourceDatanode(
+-            aBlock,
++        bm.chooseSourceDatanodes(
++            bm.getStoredBlock(aBlock),
+             cntNodes,
+             liveNodes,
+             new NumberReplicas(),
+-            UnderReplicatedBlocks.QUEUE_HIGHEST_PRIORITY));
+-
+-    assertNull("Does not choose a source node for a less-than-highest-priority"
+-        + " replication since all available source nodes have reached"
+-        + " their replication limits.",
+-        bm.chooseSourceDatanode(
+-            aBlock,
++            new ArrayList<Short>(),
++            UnderReplicatedBlocks.QUEUE_HIGHEST_PRIORITY)[0]);
++
++    assertEquals("Does not choose a source node for a less-than-highest-priority"
++            + " replication since all available source nodes have reached"
++            + " their replication limits.", 0,
++        bm.chooseSourceDatanodes(
++            bm.getStoredBlock(aBlock),
+             cntNodes,
+             liveNodes,
+             new NumberReplicas(),
+-            UnderReplicatedBlocks.QUEUE_VERY_UNDER_REPLICATED));
++            new ArrayList<Short>(),
++            UnderReplicatedBlocks.QUEUE_VERY_UNDER_REPLICATED).length);
+ 
+     // Increase the replication count to test replication count > hard limit
+     DatanodeStorageInfo targets[] = { origNodes.get(1).getStorageInfos()[0] };
+     origNodes.get(0).addBlockToBeReplicated(aBlock, targets);
+ 
+-    assertNull("Does not choose a source node for a highest-priority"
+-        + " replication when all available nodes exceed the hard limit.",
+-        bm.chooseSourceDatanode(
+-            aBlock,
++    assertEquals("Does not choose a source node for a highest-priority"
++            + " replication when all available nodes exceed the hard limit.", 0,
++        bm.chooseSourceDatanodes(
++            bm.getStoredBlock(aBlock),
+             cntNodes,
+             liveNodes,
+             new NumberReplicas(),
+-            UnderReplicatedBlocks.QUEUE_HIGHEST_PRIORITY));
++            new ArrayList<Short>(),
++            UnderReplicatedBlocks.QUEUE_HIGHEST_PRIORITY).length);
+   }
+ 
+   @Test
+@@ -557,30 +560,28 @@ public void testFavorDecomUntilHardLimit() throws Exception {
+     assertNotNull("Chooses decommissioning source node for a normal replication"
+         + " if all available source nodes have reached their replication"
+         + " limits below the hard limit.",
+-        bm.chooseSourceDatanode(
+-            aBlock,
++        bm.chooseSourceDatanodes(
++            bm.getStoredBlock(aBlock),
+             cntNodes,
+             liveNodes,
+-            new NumberReplicas(),
+-            UnderReplicatedBlocks.QUEUE_UNDER_REPLICATED));
++            new NumberReplicas(), new LinkedList<Short>(),
++            UnderReplicatedBlocks.QUEUE_UNDER_REPLICATED)[0]);
+ 
+ 
+     // Increase the replication count to test replication count > hard limit
+     DatanodeStorageInfo targets[] = { origNodes.get(1).getStorageInfos()[0] };
+     origNodes.get(0).addBlockToBeReplicated(aBlock, targets);
+ 
+-    assertNull("Does not choose a source decommissioning node for a normal"
+-        + " replication when all available nodes exceed the hard limit.",
+-        bm.chooseSourceDatanode(
+-            aBlock,
++    assertEquals("Does not choose a source decommissioning node for a normal"
++        + " replication when all available nodes exceed the hard limit.", 0,
++        bm.chooseSourceDatanodes(
++            bm.getStoredBlock(aBlock),
+             cntNodes,
+             liveNodes,
+-            new NumberReplicas(),
+-            UnderReplicatedBlocks.QUEUE_UNDER_REPLICATED));
++            new NumberReplicas(), new LinkedList<Short>(),
++            UnderReplicatedBlocks.QUEUE_UNDER_REPLICATED).length);
+   }
+ 
+-
+-
+   @Test
+   public void testSafeModeIBR() throws Exception {
+     DatanodeDescriptor node = spy(nodes.get(0));

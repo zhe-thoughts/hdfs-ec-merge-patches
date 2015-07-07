@@ -1,5 +1,5 @@
 diff --git a/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/protocolPB/PBHelper.java b/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/protocolPB/PBHelper.java
-index 5a608f8..a0acd85 100644
+index 7377d87..d16648c 100644
 --- a/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/protocolPB/PBHelper.java
 +++ b/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/protocolPB/PBHelper.java
 @@ -212,6 +212,7 @@
@@ -49,30 +49,17 @@ index 5a608f8..a0acd85 100644
  
    public static BlocksWithLocationsProto convert(BlocksWithLocations blks) {
 diff --git a/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/balancer/Balancer.java b/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/balancer/Balancer.java
-index 8b7d802..94ef834 100644
+index 402c879..509d708 100644
 --- a/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/balancer/Balancer.java
 +++ b/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/balancer/Balancer.java
-@@ -47,8 +47,8 @@
- import org.apache.hadoop.hdfs.server.balancer.Dispatcher.Source;
+@@ -48,7 +48,6 @@
  import org.apache.hadoop.hdfs.server.balancer.Dispatcher.Task;
  import org.apache.hadoop.hdfs.server.balancer.Dispatcher.Util;
+ import org.apache.hadoop.hdfs.server.blockmanagement.BlockPlacementPolicies;
 -import org.apache.hadoop.hdfs.server.blockmanagement.BlockPlacementPolicy;
  import org.apache.hadoop.hdfs.server.blockmanagement.BlockPlacementPolicyDefault;
-+import org.apache.hadoop.hdfs.server.blockmanagement.BlockPlacementPolicies;
  import org.apache.hadoop.hdfs.server.namenode.UnsupportedActionException;
  import org.apache.hadoop.hdfs.server.protocol.DatanodeStorageReport;
- import org.apache.hadoop.hdfs.server.protocol.StorageReport;
-@@ -206,7 +206,9 @@
-    */
-   private static void checkReplicationPolicyCompatibility(Configuration conf
-       ) throws UnsupportedActionException {
--    if (!(BlockPlacementPolicy.getInstance(conf, null, null, null) instanceof 
-+    BlockPlacementPolicies placementPolicies =
-+        new BlockPlacementPolicies(conf, null, null, null);
-+    if (!(placementPolicies.getPolicy(false) instanceof
-         BlockPlacementPolicyDefault)) {
-       throw new UnsupportedActionException(
-           "Balancer without BlockPlacementPolicyDefault");
 diff --git a/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/balancer/Dispatcher.java b/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/balancer/Dispatcher.java
 index 4a8f40f..930001a 100644
 --- a/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/balancer/Dispatcher.java
@@ -639,10 +626,10 @@ index a985dbd..0507faf 100644
  
    /** Constructor with one parameter */
 diff --git a/hadoop-hdfs-project/hadoop-hdfs/src/main/proto/hdfs.proto b/hadoop-hdfs-project/hadoop-hdfs/src/main/proto/hdfs.proto
-index 6dc8d43..5170c9a 100644
+index 94aac00..e1f944f 100644
 --- a/hadoop-hdfs-project/hadoop-hdfs/src/main/proto/hdfs.proto
 +++ b/hadoop-hdfs-project/hadoop-hdfs/src/main/proto/hdfs.proto
-@@ -525,6 +525,9 @@ message BlockWithLocationsProto {
+@@ -526,6 +526,9 @@ message BlockWithLocationsProto {
    repeated string datanodeUuids = 2; // Datanodes with replicas of the block
    repeated string storageUuids = 3;  // Storages with replicas of the block
    repeated StorageTypeProto storageTypes = 4;
@@ -652,3 +639,267 @@ index 6dc8d43..5170c9a 100644
  }
  
  /**
+diff --git a/hadoop-hdfs-project/hadoop-hdfs/src/test/java/org/apache/hadoop/hdfs/protocolPB/TestPBHelper.java b/hadoop-hdfs-project/hadoop-hdfs/src/test/java/org/apache/hadoop/hdfs/protocolPB/TestPBHelper.java
+index def161e..07bd7b3 100644
+--- a/hadoop-hdfs-project/hadoop-hdfs/src/test/java/org/apache/hadoop/hdfs/protocolPB/TestPBHelper.java
++++ b/hadoop-hdfs-project/hadoop-hdfs/src/test/java/org/apache/hadoop/hdfs/protocolPB/TestPBHelper.java
+@@ -79,6 +79,7 @@
+ import org.apache.hadoop.hdfs.server.protocol.BlockRecoveryCommand.RecoveringBlock;
+ import org.apache.hadoop.hdfs.server.protocol.BlocksWithLocations;
+ import org.apache.hadoop.hdfs.server.protocol.BlocksWithLocations.BlockWithLocations;
++import org.apache.hadoop.hdfs.server.protocol.BlocksWithLocations.StripedBlockWithLocations;
+ import org.apache.hadoop.hdfs.server.protocol.DatanodeProtocol;
+ import org.apache.hadoop.hdfs.server.protocol.DatanodeRegistration;
+ import org.apache.hadoop.hdfs.server.protocol.DatanodeStorage;
+@@ -189,40 +190,58 @@ public void testConvertBlock() {
+     assertEquals(b, b2);
+   }
+ 
+-  private static BlockWithLocations getBlockWithLocations(int bid) {
++  private static BlockWithLocations getBlockWithLocations(
++      int bid, boolean isStriped) {
+     final String[] datanodeUuids = {"dn1", "dn2", "dn3"};
+     final String[] storageIDs = {"s1", "s2", "s3"};
+     final StorageType[] storageTypes = {
+         StorageType.DISK, StorageType.DISK, StorageType.DISK};
+-    return new BlockWithLocations(new Block(bid, 0, 1),
++    final byte[] indices = {0, 1, 2};
++    final short dataBlkNum = 6;
++    BlockWithLocations blkLocs = new BlockWithLocations(new Block(bid, 0, 1),
+         datanodeUuids, storageIDs, storageTypes);
++    if (isStriped) {
++      blkLocs = new StripedBlockWithLocations(blkLocs, indices, dataBlkNum);
++    }
++    return blkLocs;
+   }
+ 
+   private void compare(BlockWithLocations locs1, BlockWithLocations locs2) {
+     assertEquals(locs1.getBlock(), locs2.getBlock());
+     assertTrue(Arrays.equals(locs1.getStorageIDs(), locs2.getStorageIDs()));
++    if (locs1 instanceof StripedBlockWithLocations) {
++      assertTrue(Arrays.equals(((StripedBlockWithLocations) locs1).getIndices(),
++          ((StripedBlockWithLocations) locs2).getIndices()));
++    }
+   }
+ 
+   @Test
+   public void testConvertBlockWithLocations() {
+-    BlockWithLocations locs = getBlockWithLocations(1);
+-    BlockWithLocationsProto locsProto = PBHelper.convert(locs);
+-    BlockWithLocations locs2 = PBHelper.convert(locsProto);
+-    compare(locs, locs2);
++    boolean[] testSuite = new boolean[]{false, true};
++    for (int i = 0; i < testSuite.length; i++) {
++      BlockWithLocations locs = getBlockWithLocations(1, testSuite[i]);
++      BlockWithLocationsProto locsProto = PBHelper.convert(locs);
++      BlockWithLocations locs2 = PBHelper.convert(locsProto);
++      compare(locs, locs2);
++    }
+   }
+ 
+   @Test
+   public void testConvertBlocksWithLocations() {
+-    BlockWithLocations[] list = new BlockWithLocations[] {
+-        getBlockWithLocations(1), getBlockWithLocations(2) };
+-    BlocksWithLocations locs = new BlocksWithLocations(list);
+-    BlocksWithLocationsProto locsProto = PBHelper.convert(locs);
+-    BlocksWithLocations locs2 = PBHelper.convert(locsProto);
+-    BlockWithLocations[] blocks = locs.getBlocks();
+-    BlockWithLocations[] blocks2 = locs2.getBlocks();
+-    assertEquals(blocks.length, blocks2.length);
+-    for (int i = 0; i < blocks.length; i++) {
+-      compare(blocks[i], blocks2[i]);
++    boolean[] testSuite = new boolean[]{false, true};
++    for (int i = 0; i < testSuite.length; i++) {
++      BlockWithLocations[] list = new BlockWithLocations[]{
++          getBlockWithLocations(1, testSuite[i]),
++          getBlockWithLocations(2, testSuite[i])};
++      BlocksWithLocations locs = new BlocksWithLocations(list);
++      BlocksWithLocationsProto locsProto = PBHelper.convert(locs);
++      BlocksWithLocations locs2 = PBHelper.convert(locsProto);
++      BlockWithLocations[] blocks = locs.getBlocks();
++      BlockWithLocations[] blocks2 = locs2.getBlocks();
++      assertEquals(blocks.length, blocks2.length);
++      for (int j = 0; j < blocks.length; j++) {
++        compare(blocks[j], blocks2[j]);
++      }
+     }
+   }
+ 
+@@ -304,7 +323,7 @@ public void testConvertRemoteEditLogManifest() {
+     RemoteEditLogManifest m = new RemoteEditLogManifest(logs);
+     RemoteEditLogManifestProto mProto = PBHelper.convert(m);
+     RemoteEditLogManifest m1 = PBHelper.convert(mProto);
+-    
++
+     List<RemoteEditLog> logs1 = m1.getLogs();
+     assertEquals(logs.size(), logs1.size());
+     for (int i = 0; i < logs.size(); i++) {
+@@ -333,7 +352,7 @@ private void compare(DatanodeInfo dn1, DatanodeInfo dn2) {
+       assertEquals(dn1.getInfoPort(), dn2.getInfoPort());
+       assertEquals(dn1.getIpcPort(), dn2.getIpcPort());
+       assertEquals(dn1.getLastUpdate(), dn2.getLastUpdate());
+-      assertEquals(dn1.getLevel(), dn2.getLevel());
++    assertEquals(dn1.getLevel(), dn2.getLevel());
+       assertEquals(dn1.getNetworkLocation(), dn2.getNetworkLocation());
+   }
+   
+diff --git a/hadoop-hdfs-project/hadoop-hdfs/src/test/java/org/apache/hadoop/hdfs/server/mover/TestMover.java b/hadoop-hdfs-project/hadoop-hdfs/src/test/java/org/apache/hadoop/hdfs/server/mover/TestMover.java
+index 899b5c0..17998bb 100644
+--- a/hadoop-hdfs-project/hadoop-hdfs/src/test/java/org/apache/hadoop/hdfs/server/mover/TestMover.java
++++ b/hadoop-hdfs-project/hadoop-hdfs/src/test/java/org/apache/hadoop/hdfs/server/mover/TestMover.java
+@@ -27,6 +27,7 @@
+ import org.apache.hadoop.fs.FSDataOutputStream;
+ import org.apache.hadoop.fs.Path;
+ import org.apache.hadoop.fs.StorageType;
++import org.apache.hadoop.fs.permission.FsPermission;
+ import org.apache.hadoop.hdfs.DFSConfigKeys;
+ import org.apache.hadoop.hdfs.DistributedFileSystem;
+ import org.apache.hadoop.hdfs.DFSTestUtil;
+@@ -34,10 +35,16 @@
+ import org.apache.hadoop.hdfs.HdfsConfiguration;
+ import org.apache.hadoop.hdfs.MiniDFSCluster;
+ import org.apache.hadoop.hdfs.MiniDFSNNTopology;
++import org.apache.hadoop.hdfs.NameNodeProxies;
++import org.apache.hadoop.hdfs.protocol.ClientProtocol;
++import org.apache.hadoop.hdfs.protocol.HdfsConstants;
+ import org.apache.hadoop.hdfs.protocol.LocatedBlock;
++import org.apache.hadoop.hdfs.protocol.LocatedBlocks;
++import org.apache.hadoop.hdfs.server.balancer.Dispatcher;
+ import org.apache.hadoop.hdfs.server.balancer.Dispatcher.DBlock;
+ import org.apache.hadoop.hdfs.server.balancer.ExitStatus;
+ import org.apache.hadoop.hdfs.server.balancer.NameNodeConnector;
++import org.apache.hadoop.hdfs.server.common.HdfsServerConstants;
+ import org.apache.hadoop.hdfs.server.balancer.TestBalancer;
+ import org.apache.hadoop.hdfs.server.mover.Mover.MLocation;
+ import org.apache.hadoop.hdfs.server.namenode.ha.HATestUtil;
+@@ -99,7 +106,7 @@ public void testScheduleSameBlock() throws IOException {
+       final LocatedBlock lb = dfs.getClient().getLocatedBlocks(file, 0).get(0);
+       final List<MLocation> locations = MLocation.toLocations(lb);
+       final MLocation ml = locations.get(0);
+-      final DBlock db = mover.newDBlock(lb.getBlock().getLocalBlock(), locations);
++      final DBlock db = mover.newDBlock(lb, locations, null);
+ 
+       final List<StorageType> storageTypes = new ArrayList<StorageType>(
+           Arrays.asList(StorageType.DEFAULT, StorageType.DEFAULT));
+@@ -409,4 +416,120 @@ public void testMoverFailedRetry() throws Exception {
+       cluster.shutdown();
+     }
+   }
++
++  int dataBlocks = HdfsConstants.NUM_DATA_BLOCKS;
++  int parityBlocks = HdfsConstants.NUM_PARITY_BLOCKS;
++  private final static int cellSize = HdfsConstants.BLOCK_STRIPED_CELL_SIZE;
++  private final static int stripesPerBlock = 4;
++  static int DEFAULT_STRIPE_BLOCK_SIZE = cellSize * stripesPerBlock;
++
++  static void initConfWithStripe(Configuration conf) {
++    conf.setLong(DFSConfigKeys.DFS_BLOCK_SIZE_KEY, DEFAULT_STRIPE_BLOCK_SIZE);
++    conf.setLong(DFSConfigKeys.DFS_HEARTBEAT_INTERVAL_KEY, 1L);
++    conf.setLong(DFSConfigKeys.DFS_NAMENODE_REPLICATION_INTERVAL_KEY, 1L);
++    conf.setBoolean(DFSConfigKeys.DFS_NAMENODE_REPLICATION_CONSIDERLOAD_KEY, false);
++    Dispatcher.setBlockMoveWaitTime(3000L);
++  }
++
++  @Test(timeout = 300000)
++  public void testMoverWithStripedFile() throws Exception {
++    final Configuration conf = new HdfsConfiguration();
++    initConfWithStripe(conf);
++
++    // start 10 datanodes
++    int numOfDatanodes =10;
++    int storagesPerDatanode=2;
++    long capacity = 10 * DEFAULT_STRIPE_BLOCK_SIZE;
++    long[][] capacities = new long[numOfDatanodes][storagesPerDatanode];
++    for (int i = 0; i < numOfDatanodes; i++) {
++      for(int j=0;j<storagesPerDatanode;j++){
++        capacities[i][j]=capacity;
++      }
++    }
++    final MiniDFSCluster cluster = new MiniDFSCluster.Builder(conf)
++        .numDataNodes(numOfDatanodes)
++        .storagesPerDatanode(storagesPerDatanode)
++        .storageTypes(new StorageType[][]{
++            {StorageType.DISK, StorageType.DISK},
++            {StorageType.DISK, StorageType.DISK},
++            {StorageType.DISK, StorageType.DISK},
++            {StorageType.DISK, StorageType.DISK},
++            {StorageType.DISK, StorageType.DISK},
++            {StorageType.DISK, StorageType.ARCHIVE},
++            {StorageType.DISK, StorageType.ARCHIVE},
++            {StorageType.DISK, StorageType.ARCHIVE},
++            {StorageType.DISK, StorageType.ARCHIVE},
++            {StorageType.DISK, StorageType.ARCHIVE}})
++        .storageCapacities(capacities)
++        .build();
++
++    try {
++      cluster.waitActive();
++
++      // set "/bar" directory with HOT storage policy.
++      ClientProtocol client = NameNodeProxies.createProxy(conf,
++          cluster.getFileSystem(0).getUri(), ClientProtocol.class).getProxy();
++      String barDir = "/bar";
++      client.mkdirs(barDir, new FsPermission((short) 777), true);
++      client.setStoragePolicy(barDir,
++          HdfsServerConstants.HOT_STORAGE_POLICY_NAME);
++      // set "/bar" directory with EC zone.
++      client.createErasureCodingZone(barDir, null, 0);
++
++      // write file to barDir
++      final String fooFile = "/bar/foo";
++      long fileLen = 20 * DEFAULT_STRIPE_BLOCK_SIZE ;
++      DFSTestUtil.createFile(cluster.getFileSystem(), new Path(fooFile),
++          fileLen,(short) 3, 0);
++
++      // verify storage types and locations
++      LocatedBlocks locatedBlocks =
++          client.getBlockLocations(fooFile, 0, fileLen);
++      for(LocatedBlock lb : locatedBlocks.getLocatedBlocks()){
++        for( StorageType type : lb.getStorageTypes()){
++          Assert.assertEquals(StorageType.DISK, type);
++        }
++      }
++      DFSTestUtil.verifyLocatedStripedBlocks(locatedBlocks,
++          dataBlocks + parityBlocks);
++
++      // start 5 more datanodes
++      numOfDatanodes +=5;
++      capacities = new long[5][storagesPerDatanode];
++      for (int i = 0; i < 5; i++) {
++        for(int j=0;j<storagesPerDatanode;j++){
++          capacities[i][j]=capacity;
++        }
++      }
++      cluster.startDataNodes(conf, 5,
++          new StorageType[][]{
++              {StorageType.ARCHIVE, StorageType.ARCHIVE},
++              {StorageType.ARCHIVE, StorageType.ARCHIVE},
++              {StorageType.ARCHIVE, StorageType.ARCHIVE},
++              {StorageType.ARCHIVE, StorageType.ARCHIVE},
++              {StorageType.ARCHIVE, StorageType.ARCHIVE}},
++          true, null, null, null,capacities, null, false, false, false, null);
++      cluster.triggerHeartbeats();
++
++      // move file to ARCHIVE
++      client.setStoragePolicy(barDir, "COLD");
++      // run Mover
++      int rc = ToolRunner.run(conf, new Mover.Cli(),
++          new String[] { "-p", barDir });
++      Assert.assertEquals("Movement to ARCHIVE should be successfull", 0, rc);
++
++      // verify storage types and locations
++      locatedBlocks = client.getBlockLocations(fooFile, 0, fileLen);
++      for(LocatedBlock lb : locatedBlocks.getLocatedBlocks()){
++        for( StorageType type : lb.getStorageTypes()){
++          Assert.assertEquals(StorageType.ARCHIVE, type);
++        }
++      }
++      DFSTestUtil.verifyLocatedStripedBlocks(locatedBlocks,
++          dataBlocks + parityBlocks);
++
++    }finally{
++      cluster.shutdown();
++    }
++  }
+ }

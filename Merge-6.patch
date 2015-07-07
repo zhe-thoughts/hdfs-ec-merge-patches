@@ -289,6 +289,32 @@ index 850b58b..754891e 100644
            rpcProxy.updateBlockForPipeline(null, req).getBlock());
      } catch (ServiceException e) {
        throw ProtobufHelper.getRemoteException(e);
+diff --git a/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/protocolPB/DatanodeProtocolClientSideTranslatorPB.java b/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/protocolPB/DatanodeProtocolClientSideTranslatorPB.java
+index 94028a2..e71e24c 100644
+--- a/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/protocolPB/DatanodeProtocolClientSideTranslatorPB.java
++++ b/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/protocolPB/DatanodeProtocolClientSideTranslatorPB.java
+@@ -281,7 +281,7 @@ public void reportBadBlocks(LocatedBlock[] blocks) throws IOException {
+     ReportBadBlocksRequestProto.Builder builder = ReportBadBlocksRequestProto
+         .newBuilder();
+     for (int i = 0; i < blocks.length; i++) {
+-      builder.addBlocks(i, PBHelper.convert(blocks[i]));
++      builder.addBlocks(i, PBHelper.convertLocatedBlock(blocks[i]));
+     }
+     ReportBadBlocksRequestProto req = builder.build();
+     try {
+diff --git a/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/protocolPB/DatanodeProtocolServerSideTranslatorPB.java b/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/protocolPB/DatanodeProtocolServerSideTranslatorPB.java
+index e133ec7..09ba564 100644
+--- a/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/protocolPB/DatanodeProtocolServerSideTranslatorPB.java
++++ b/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/protocolPB/DatanodeProtocolServerSideTranslatorPB.java
+@@ -259,7 +259,7 @@ public ReportBadBlocksResponseProto reportBadBlocks(RpcController controller,
+     List<LocatedBlockProto> lbps = request.getBlocksList();
+     LocatedBlock [] blocks = new LocatedBlock [lbps.size()];
+     for(int i=0; i<lbps.size(); i++) {
+-      blocks[i] = PBHelper.convert(lbps.get(i));
++      blocks[i] = PBHelper.convertLocatedBlockProto(lbps.get(i));
+     }
+     try {
+       impl.reportBadBlocks(blocks);
 diff --git a/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/protocolPB/PBHelper.java b/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/protocolPB/PBHelper.java
 index 6287116..ce06c30 100644
 --- a/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/protocolPB/PBHelper.java
@@ -481,10 +507,15 @@ index 6287116..ce06c30 100644
    }
    
 diff --git a/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/blockmanagement/BlockManager.java b/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/blockmanagement/BlockManager.java
-index 9781e09..629da0b 100644
+index 9781e09..2ef8dee 100644
 --- a/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/blockmanagement/BlockManager.java
 +++ b/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/blockmanagement/BlockManager.java
-@@ -61,6 +61,7 @@
+@@ -57,10 +57,12 @@
+ import org.apache.hadoop.hdfs.protocol.BlockListAsLongs.BlockReportReplica;
+ import org.apache.hadoop.hdfs.protocol.DatanodeID;
+ import org.apache.hadoop.hdfs.protocol.DatanodeInfo;
++import org.apache.hadoop.hdfs.protocol.ErasureCodingZone;
+ import org.apache.hadoop.hdfs.protocol.ExtendedBlock;
  import org.apache.hadoop.fs.FileEncryptionInfo;
  import org.apache.hadoop.hdfs.protocol.LocatedBlock;
  import org.apache.hadoop.hdfs.protocol.LocatedBlocks;
@@ -492,7 +523,7 @@ index 9781e09..629da0b 100644
  import org.apache.hadoop.hdfs.protocol.UnregisteredNodeException;
  import org.apache.hadoop.hdfs.security.token.block.BlockTokenIdentifier;
  import org.apache.hadoop.hdfs.security.token.block.BlockTokenSecretManager;
-@@ -89,6 +90,7 @@
+@@ -89,6 +91,7 @@
  import org.apache.hadoop.hdfs.server.protocol.ReceivedDeletedBlockInfo;
  import org.apache.hadoop.hdfs.server.protocol.StorageReceivedDeletedBlocks;
  import org.apache.hadoop.hdfs.util.LightWeightLinkedSet;
@@ -500,7 +531,7 @@ index 9781e09..629da0b 100644
  import org.apache.hadoop.metrics2.util.MBeans;
  import org.apache.hadoop.net.Node;
  import org.apache.hadoop.security.UserGroupInformation;
-@@ -889,7 +891,11 @@ private LocatedBlock createLocatedBlock(final BlockInfo blk, final long pos)
+@@ -889,7 +892,11 @@ private LocatedBlock createLocatedBlock(final BlockInfo blk, final long pos)
        final DatanodeStorageInfo[] storages = uc.getExpectedStorageLocations();
        final ExtendedBlock eb =
            new ExtendedBlock(namesystem.getBlockPoolId(), blk);
@@ -513,7 +544,7 @@ index 9781e09..629da0b 100644
      }
  
      // get block locations
-@@ -906,24 +912,34 @@ private LocatedBlock createLocatedBlock(final BlockInfo blk, final long pos)
+@@ -906,24 +913,34 @@ private LocatedBlock createLocatedBlock(final BlockInfo blk, final long pos)
          numCorruptNodes == numNodes;
      final int numMachines = isCorrupt ? numNodes: numNodes - numCorruptNodes;
      final DatanodeStorageInfo[] machines = new DatanodeStorageInfo[numMachines];
@@ -551,7 +582,7 @@ index 9781e09..629da0b 100644
    }
  
    /** Create a LocatedBlocks. */
-@@ -931,14 +947,18 @@ public LocatedBlocks createLocatedBlocks(final BlockInfo[] blocks,
+@@ -931,14 +948,18 @@ public LocatedBlocks createLocatedBlocks(final BlockInfo[] blocks,
        final long fileSizeExcludeBlocksUnderConstruction,
        final boolean isFileUnderConstruction, final long offset,
        final long length, final boolean needBlockToken,
@@ -572,7 +603,7 @@ index 9781e09..629da0b 100644
      } else {
        if (LOG.isDebugEnabled()) {
          LOG.debug("blocks = " + java.util.Arrays.asList(blocks));
-@@ -961,9 +981,9 @@ public LocatedBlocks createLocatedBlocks(final BlockInfo[] blocks,
+@@ -961,9 +982,9 @@ public LocatedBlocks createLocatedBlocks(final BlockInfo[] blocks,
              fileSizeExcludeBlocksUnderConstruction, mode);
          isComplete = true;
        }
@@ -585,7 +616,7 @@ index 9781e09..629da0b 100644
      }
    }
  
-@@ -4038,6 +4058,19 @@ public void clearQueues() {
+@@ -4038,6 +4059,19 @@ public void clearQueues() {
      postponedMisreplicatedBlocksCount.set(0);
    };
  
@@ -605,7 +636,7 @@ index 9781e09..629da0b 100644
    public static LocatedBlock newLocatedBlock(
        ExtendedBlock b, DatanodeStorageInfo[] storages,
        long startOffset, boolean corrupt) {
-@@ -4050,6 +4083,18 @@ public static LocatedBlock newLocatedBlock(
+@@ -4050,6 +4084,18 @@ public static LocatedBlock newLocatedBlock(
          null);
    }
  
@@ -625,7 +656,7 @@ index 9781e09..629da0b 100644
  
      private final BlockInfo block;
 diff --git a/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/namenode/FSDirStatAndListingOp.java b/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/namenode/FSDirStatAndListingOp.java
-index 23261a1..c5b6845 100644
+index 23261a1..7cddf56 100644
 --- a/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/namenode/FSDirStatAndListingOp.java
 +++ b/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/namenode/FSDirStatAndListingOp.java
 @@ -185,9 +185,12 @@ static GetBlockLocationsResult getBlockLocations(
@@ -642,13 +673,17 @@ index 23261a1..c5b6845 100644
  
        // Set caching information for the located blocks.
        for (LocatedBlock lb : blocks.getLocatedBlocks()) {
-@@ -518,9 +521,12 @@ private static HdfsLocatedFileStatus createLocatedFileStatus(
-       final long fileSize = !inSnapshot && isUc ?
-           fileNode.computeFileSizeNotIncludingLastUcBlock() : size;
+@@ -507,6 +510,8 @@ private static HdfsLocatedFileStatus createLocatedFileStatus(
+     final boolean isEncrypted;
+     final FileEncryptionInfo feInfo = isRawPath ? null :
+         fsd.getFileEncryptionInfo(node, snapshot, iip);
++    final ErasureCodingZone ecZone = FSDirErasureCodingOp.getErasureCodingZone(
++        fsd.getFSNamesystem(), iip);
+     if (node.isFile()) {
+       final INodeFile fileNode = node.asFile();
+       size = fileNode.computeFileSize(snapshot);
+@@ -520,7 +525,7 @@ private static HdfsLocatedFileStatus createLocatedFileStatus(
  
-+      final ErasureCodingZone ecZone = FSDirErasureCodingOp.getErasureCodingZone(
-+          fsd.getFSNamesystem(), iip);
-+
        loc = fsd.getFSNamesystem().getBlockManager().createLocatedBlocks(
            fileNode.getBlocks(snapshot), fileSize, isUc, 0L, size, false,
 -          inSnapshot, feInfo);
@@ -656,7 +691,7 @@ index 23261a1..c5b6845 100644
        if (loc == null) {
          loc = new LocatedBlocks();
        }
-@@ -531,8 +537,6 @@ private static HdfsLocatedFileStatus createLocatedFileStatus(
+@@ -531,8 +536,6 @@ private static HdfsLocatedFileStatus createLocatedFileStatus(
      }
      int childrenNum = node.isDirectory() ?
          node.asDirectory().getChildrenNum(snapshot) : 0;
@@ -694,10 +729,18 @@ index cd308c8..2762ca2 100644
        // lastBlock is not part of getLocatedBlocks(), might need to sort it too
        LocatedBlock lastBlock = blocks.getLastLocatedBlock();
 diff --git a/hadoop-hdfs-project/hadoop-hdfs/src/main/proto/hdfs.proto b/hadoop-hdfs-project/hadoop-hdfs/src/main/proto/hdfs.proto
-index 0b387f0..6dc8d43 100644
+index 0b387f0..94aac00 100644
 --- a/hadoop-hdfs-project/hadoop-hdfs/src/main/proto/hdfs.proto
 +++ b/hadoop-hdfs-project/hadoop-hdfs/src/main/proto/hdfs.proto
-@@ -300,6 +300,10 @@ message LocatedBlocksProto {
+@@ -220,6 +220,7 @@ message LocatedBlockProto {
+   repeated bool isCached = 6 [packed=true]; // if a location in locs is cached
+   repeated StorageTypeProto storageTypes = 7;
+   repeated string storageIDs = 8;
++  repeated uint32 blockIndex = 9; // used for striped block to indicate block index for each storage
+ }
+ 
+ message DataEncryptionKeyProto {
+@@ -300,6 +301,10 @@ message LocatedBlocksProto {
    optional LocatedBlockProto lastBlock = 4;
    required bool isLastBlockComplete = 5;
    optional FileEncryptionInfoProto fileEncryptionInfo = 6;
@@ -708,3 +751,98 @@ index 0b387f0..6dc8d43 100644
  }
  
  /**
+diff --git a/hadoop-hdfs-project/hadoop-hdfs/src/test/java/org/apache/hadoop/hdfs/TestDFSClientRetries.java b/hadoop-hdfs-project/hadoop-hdfs/src/test/java/org/apache/hadoop/hdfs/TestDFSClientRetries.java
+index 8e850dc..db294cd 100644
+--- a/hadoop-hdfs-project/hadoop-hdfs/src/test/java/org/apache/hadoop/hdfs/TestDFSClientRetries.java
++++ b/hadoop-hdfs-project/hadoop-hdfs/src/test/java/org/apache/hadoop/hdfs/TestDFSClientRetries.java
+@@ -497,7 +497,7 @@ private LocatedBlocks makeBadBlockList(LocatedBlocks goodBlockList) {
+       badBlocks.add(badLocatedBlock);
+       return new LocatedBlocks(goodBlockList.getFileLength(), false,
+                                badBlocks, null, true,
+-                               null);
++                               null, null, 0);
+     }
+   }
+   
+diff --git a/hadoop-hdfs-project/hadoop-hdfs/src/test/java/org/apache/hadoop/hdfs/TestDFSUtil.java b/hadoop-hdfs-project/hadoop-hdfs/src/test/java/org/apache/hadoop/hdfs/TestDFSUtil.java
+index a821c30..4233a1c 100644
+--- a/hadoop-hdfs-project/hadoop-hdfs/src/test/java/org/apache/hadoop/hdfs/TestDFSUtil.java
++++ b/hadoop-hdfs-project/hadoop-hdfs/src/test/java/org/apache/hadoop/hdfs/TestDFSUtil.java
+@@ -110,7 +110,7 @@ public void testLocatedBlocks2Locations() {
+     l2.setCorrupt(true);
+ 
+     List<LocatedBlock> ls = Arrays.asList(l1, l2);
+-    LocatedBlocks lbs = new LocatedBlocks(10, false, ls, l2, true, null);
++    LocatedBlocks lbs = new LocatedBlocks(10, false, ls, l2, true, null, null, 0);
+ 
+     BlockLocation[] bs = DFSUtilClient.locatedBlocks2Locations(lbs);
+ 
+diff --git a/hadoop-hdfs-project/hadoop-hdfs/src/test/java/org/apache/hadoop/hdfs/protocolPB/TestPBHelper.java b/hadoop-hdfs-project/hadoop-hdfs/src/test/java/org/apache/hadoop/hdfs/protocolPB/TestPBHelper.java
+index c7233bd..f995632 100644
+--- a/hadoop-hdfs-project/hadoop-hdfs/src/test/java/org/apache/hadoop/hdfs/protocolPB/TestPBHelper.java
++++ b/hadoop-hdfs-project/hadoop-hdfs/src/test/java/org/apache/hadoop/hdfs/protocolPB/TestPBHelper.java
+@@ -63,10 +63,13 @@
+ import org.apache.hadoop.hdfs.security.token.block.BlockKey;
+ import org.apache.hadoop.hdfs.security.token.block.BlockTokenIdentifier;
+ import org.apache.hadoop.hdfs.security.token.block.ExportedBlockKeys;
++import org.apache.hadoop.hdfs.server.blockmanagement.BlockManagerTestUtil;
++import org.apache.hadoop.hdfs.server.blockmanagement.DatanodeStorageInfo;
+ import org.apache.hadoop.hdfs.server.common.HdfsServerConstants.NamenodeRole;
+ import org.apache.hadoop.hdfs.server.common.HdfsServerConstants.NodeType;
+ import org.apache.hadoop.hdfs.server.common.StorageInfo;
+ import org.apache.hadoop.hdfs.server.namenode.CheckpointSignature;
++import org.apache.hadoop.hdfs.server.namenode.ErasureCodingSchemaManager;
+ import org.apache.hadoop.hdfs.server.protocol.BlockCommand;
+ import org.apache.hadoop.hdfs.server.protocol.BlockRecoveryCommand;
+ import org.apache.hadoop.hdfs.server.protocol.BlockRecoveryCommand.RecoveringBlock;
+@@ -80,6 +83,7 @@
+ import org.apache.hadoop.hdfs.server.protocol.RemoteEditLog;
+ import org.apache.hadoop.hdfs.server.protocol.RemoteEditLogManifest;
+ import org.apache.hadoop.io.Text;
++import org.apache.hadoop.io.erasurecode.ECSchema;
+ import org.apache.hadoop.security.proto.SecurityProtos.TokenProto;
+ import org.apache.hadoop.security.token.Token;
+ import org.apache.hadoop.util.DataChecksum;
+@@ -489,16 +493,16 @@ private LocatedBlock createLocatedBlockNoStorageMedia() {
+   @Test
+   public void testConvertLocatedBlock() {
+     LocatedBlock lb = createLocatedBlock();
+-    LocatedBlockProto lbProto = PBHelper.convert(lb);
+-    LocatedBlock lb2 = PBHelper.convert(lbProto);
++    LocatedBlockProto lbProto = PBHelper.convertLocatedBlock(lb);
++    LocatedBlock lb2 = PBHelper.convertLocatedBlockProto(lbProto);
+     compare(lb,lb2);
+   }
+ 
+   @Test
+   public void testConvertLocatedBlockNoStorageMedia() {
+     LocatedBlock lb = createLocatedBlockNoStorageMedia();
+-    LocatedBlockProto lbProto = PBHelper.convert(lb);
+-    LocatedBlock lb2 = PBHelper.convert(lbProto);
++    LocatedBlockProto lbProto = PBHelper.convertLocatedBlock(lb);
++    LocatedBlock lb2 = PBHelper.convertLocatedBlockProto(lbProto);
+     compare(lb,lb2);
+   }
+ 
+@@ -508,8 +512,8 @@ public void testConvertLocatedBlockList() {
+     for (int i=0;i<3;i++) {
+       lbl.add(createLocatedBlock());
+     }
+-    List<LocatedBlockProto> lbpl = PBHelper.convertLocatedBlock2(lbl);
+-    List<LocatedBlock> lbl2 = PBHelper.convertLocatedBlock(lbpl);
++    List<LocatedBlockProto> lbpl = PBHelper.convertLocatedBlocks2(lbl);
++    List<LocatedBlock> lbl2 = PBHelper.convertLocatedBlocks(lbpl);
+     assertEquals(lbl.size(), lbl2.size());
+     for (int i=0;i<lbl.size();i++) {
+       compare(lbl.get(i), lbl2.get(2));
+@@ -522,8 +526,8 @@ public void testConvertLocatedBlockArray() {
+     for (int i=0;i<3;i++) {
+       lbl[i] = createLocatedBlock();
+     }
+-    LocatedBlockProto [] lbpl = PBHelper.convertLocatedBlock(lbl);
+-    LocatedBlock [] lbl2 = PBHelper.convertLocatedBlock(lbpl);
++    LocatedBlockProto [] lbpl = PBHelper.convertLocatedBlocks(lbl);
++    LocatedBlock [] lbl2 = PBHelper.convertLocatedBlocks(lbpl);
+     assertEquals(lbl.length, lbl2.length);
+     for (int i=0;i<lbl.length;i++) {
+       compare(lbl[i], lbl2[i]);
