@@ -1,3 +1,17 @@
+diff --git a/hadoop-hdfs-project/hadoop-hdfs-client/src/main/proto/hdfs.proto b/hadoop-hdfs-project/hadoop-hdfs-client/src/main/proto/hdfs.proto
+index 94aac00..e1f944f 100644
+--- a/hadoop-hdfs-project/hadoop-hdfs-client/src/main/proto/hdfs.proto
++++ b/hadoop-hdfs-project/hadoop-hdfs-client/src/main/proto/hdfs.proto
+@@ -526,6 +526,9 @@ message BlockWithLocationsProto {
+   repeated string datanodeUuids = 2; // Datanodes with replicas of the block
+   repeated string storageUuids = 3;  // Storages with replicas of the block
+   repeated StorageTypeProto storageTypes = 4;
++
++  optional bytes indices = 5;
++  optional uint32 dataBlockNum = 6;
+ }
+ 
+ /**
 diff --git a/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/protocolPB/PBHelper.java b/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/protocolPB/PBHelper.java
 index 7377d87..d16648c 100644
 --- a/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/protocolPB/PBHelper.java
@@ -625,20 +639,6 @@ index a985dbd..0507faf 100644
    private final BlockWithLocations[] blocks;
  
    /** Constructor with one parameter */
-diff --git a/hadoop-hdfs-project/hadoop-hdfs/src/main/proto/hdfs.proto b/hadoop-hdfs-project/hadoop-hdfs/src/main/proto/hdfs.proto
-index 94aac00..e1f944f 100644
---- a/hadoop-hdfs-project/hadoop-hdfs/src/main/proto/hdfs.proto
-+++ b/hadoop-hdfs-project/hadoop-hdfs/src/main/proto/hdfs.proto
-@@ -526,6 +526,9 @@ message BlockWithLocationsProto {
-   repeated string datanodeUuids = 2; // Datanodes with replicas of the block
-   repeated string storageUuids = 3;  // Storages with replicas of the block
-   repeated StorageTypeProto storageTypes = 4;
-+
-+  optional bytes indices = 5;
-+  optional uint32 dataBlockNum = 6;
- }
- 
- /**
 diff --git a/hadoop-hdfs-project/hadoop-hdfs/src/test/java/org/apache/hadoop/hdfs/protocolPB/TestPBHelper.java b/hadoop-hdfs-project/hadoop-hdfs/src/test/java/org/apache/hadoop/hdfs/protocolPB/TestPBHelper.java
 index def161e..07bd7b3 100644
 --- a/hadoop-hdfs-project/hadoop-hdfs/src/test/java/org/apache/hadoop/hdfs/protocolPB/TestPBHelper.java

@@ -184,6 +184,29 @@ index 5ce6c85..eeadd73 100644
    }
  
  }
+diff --git a/hadoop-hdfs-project/hadoop-hdfs-client/src/main/proto/hdfs.proto b/hadoop-hdfs-project/hadoop-hdfs-client/src/main/proto/hdfs.proto
+index 0b387f0..94aac00 100644
+--- a/hadoop-hdfs-project/hadoop-hdfs-client/src/main/proto/hdfs.proto
++++ b/hadoop-hdfs-project/hadoop-hdfs-client/src/main/proto/hdfs.proto
+@@ -220,6 +220,7 @@ message LocatedBlockProto {
+   repeated bool isCached = 6 [packed=true]; // if a location in locs is cached
+   repeated StorageTypeProto storageTypes = 7;
+   repeated string storageIDs = 8;
++  repeated uint32 blockIndex = 9; // used for striped block to indicate block index for each storage
+ }
+ 
+ message DataEncryptionKeyProto {
+@@ -300,6 +301,10 @@ message LocatedBlocksProto {
+   optional LocatedBlockProto lastBlock = 4;
+   required bool isLastBlockComplete = 5;
+   optional FileEncryptionInfoProto fileEncryptionInfo = 6;
++
++  // Optional field for erasure coding
++  optional ECSchemaProto eCSchema = 7;
++  optional uint32 stripeCellSize = 8;
+ }
+ 
+ /**
 diff --git a/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/protocolPB/ClientNamenodeProtocolServerSideTranslatorPB.java b/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/protocolPB/ClientNamenodeProtocolServerSideTranslatorPB.java
 index 3d36cb1..6f70b50 100644
 --- a/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/protocolPB/ClientNamenodeProtocolServerSideTranslatorPB.java
@@ -728,29 +751,6 @@ index cd308c8..2762ca2 100644
  
        // lastBlock is not part of getLocatedBlocks(), might need to sort it too
        LocatedBlock lastBlock = blocks.getLastLocatedBlock();
-diff --git a/hadoop-hdfs-project/hadoop-hdfs/src/main/proto/hdfs.proto b/hadoop-hdfs-project/hadoop-hdfs/src/main/proto/hdfs.proto
-index 0b387f0..94aac00 100644
---- a/hadoop-hdfs-project/hadoop-hdfs/src/main/proto/hdfs.proto
-+++ b/hadoop-hdfs-project/hadoop-hdfs/src/main/proto/hdfs.proto
-@@ -220,6 +220,7 @@ message LocatedBlockProto {
-   repeated bool isCached = 6 [packed=true]; // if a location in locs is cached
-   repeated StorageTypeProto storageTypes = 7;
-   repeated string storageIDs = 8;
-+  repeated uint32 blockIndex = 9; // used for striped block to indicate block index for each storage
- }
- 
- message DataEncryptionKeyProto {
-@@ -300,6 +301,10 @@ message LocatedBlocksProto {
-   optional LocatedBlockProto lastBlock = 4;
-   required bool isLastBlockComplete = 5;
-   optional FileEncryptionInfoProto fileEncryptionInfo = 6;
-+
-+  // Optional field for erasure coding
-+  optional ECSchemaProto eCSchema = 7;
-+  optional uint32 stripeCellSize = 8;
- }
- 
- /**
 diff --git a/hadoop-hdfs-project/hadoop-hdfs/src/test/java/org/apache/hadoop/hdfs/TestDFSClientRetries.java b/hadoop-hdfs-project/hadoop-hdfs/src/test/java/org/apache/hadoop/hdfs/TestDFSClientRetries.java
 index 8e850dc..db294cd 100644
 --- a/hadoop-hdfs-project/hadoop-hdfs/src/test/java/org/apache/hadoop/hdfs/TestDFSClientRetries.java

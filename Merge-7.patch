@@ -1,3 +1,26 @@
+diff --git a/hadoop-hdfs-project/hadoop-hdfs-client/src/main/proto/erasurecoding.proto b/hadoop-hdfs-project/hadoop-hdfs-client/src/main/proto/erasurecoding.proto
+index e656659..afdfd05 100644
+--- a/hadoop-hdfs-project/hadoop-hdfs-client/src/main/proto/erasurecoding.proto
++++ b/hadoop-hdfs-project/hadoop-hdfs-client/src/main/proto/erasurecoding.proto
+@@ -55,3 +55,17 @@ message GetErasureCodingZoneRequestProto {
+ message GetErasureCodingZoneResponseProto {
+   optional ErasureCodingZoneProto ECZone = 1;
+ }
++
++/**
++ * Block erasure coding recovery info
++ */
++message BlockECRecoveryInfoProto {
++  required ExtendedBlockProto block = 1;
++  required DatanodeInfosProto sourceDnInfos = 2;
++  required DatanodeInfosProto targetDnInfos = 3;
++  required StorageUuidsProto targetStorageUuids = 4;
++  required StorageTypesProto targetStorageTypes = 5;
++  repeated uint32 liveBlockIndices = 6;
++  required ECSchemaProto ecSchema = 7;
++  required uint32 cellSize = 8;
++}
+\ No newline at end of file
 diff --git a/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/protocolPB/PBHelper.java b/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/protocolPB/PBHelper.java
 index ce06c30..7377d87 100644
 --- a/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/protocolPB/PBHelper.java
@@ -1059,29 +1082,6 @@ index b87e753..9d24b91 100644
   * registration - Information of the datanode registering with the namenode
   */
  message RegisterDatanodeRequestProto {
-diff --git a/hadoop-hdfs-project/hadoop-hdfs/src/main/proto/erasurecoding.proto b/hadoop-hdfs-project/hadoop-hdfs/src/main/proto/erasurecoding.proto
-index e656659..afdfd05 100644
---- a/hadoop-hdfs-project/hadoop-hdfs/src/main/proto/erasurecoding.proto
-+++ b/hadoop-hdfs-project/hadoop-hdfs/src/main/proto/erasurecoding.proto
-@@ -55,3 +55,17 @@ message GetErasureCodingZoneRequestProto {
- message GetErasureCodingZoneResponseProto {
-   optional ErasureCodingZoneProto ECZone = 1;
- }
-+
-+/**
-+ * Block erasure coding recovery info
-+ */
-+message BlockECRecoveryInfoProto {
-+  required ExtendedBlockProto block = 1;
-+  required DatanodeInfosProto sourceDnInfos = 2;
-+  required DatanodeInfosProto targetDnInfos = 3;
-+  required StorageUuidsProto targetStorageUuids = 4;
-+  required StorageTypesProto targetStorageTypes = 5;
-+  repeated uint32 liveBlockIndices = 6;
-+  required ECSchemaProto ecSchema = 7;
-+  required uint32 cellSize = 8;
-+}
-\ No newline at end of file
 diff --git a/hadoop-hdfs-project/hadoop-hdfs/src/test/java/org/apache/hadoop/hdfs/protocolPB/TestPBHelper.java b/hadoop-hdfs-project/hadoop-hdfs/src/test/java/org/apache/hadoop/hdfs/protocolPB/TestPBHelper.java
 index f995632..def161e 100644
 --- a/hadoop-hdfs-project/hadoop-hdfs/src/test/java/org/apache/hadoop/hdfs/protocolPB/TestPBHelper.java

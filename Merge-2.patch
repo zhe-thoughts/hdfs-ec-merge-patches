@@ -1,3 +1,15 @@
+diff --git a/hadoop-hdfs-project/hadoop-hdfs-client/pom.xml b/hadoop-hdfs-project/hadoop-hdfs-client/pom.xml
+index aeaa980..03b4a1c 100644
+--- a/hadoop-hdfs-project/hadoop-hdfs-client/pom.xml
++++ b/hadoop-hdfs-project/hadoop-hdfs-client/pom.xml
+@@ -91,6 +91,7 @@ http://maven.apache.org/xsd/maven-4.0.0.xsd">
+                   <include>hdfs.proto</include>
+                   <include>encryption.proto</include>
+                   <include>inotify.proto</include>
++                  <include>erasurecoding.proto</include>
+                 </includes>
+               </source>
+               <output>${project.build.directory}/generated-sources/java</output>
 diff --git a/hadoop-hdfs-project/hadoop-hdfs-client/src/main/java/org/apache/hadoop/hdfs/protocol/ClientProtocol.java b/hadoop-hdfs-project/hadoop-hdfs-client/src/main/java/org/apache/hadoop/hdfs/protocol/ClientProtocol.java
 index 381be30..104c694 100644
 --- a/hadoop-hdfs-project/hadoop-hdfs-client/src/main/java/org/apache/hadoop/hdfs/protocol/ClientProtocol.java
@@ -216,18 +228,139 @@ index 713836c..5ce6c85 100644
    }
  
    /** Convert a Json map to an ExtendedBlock object. */
-diff --git a/hadoop-hdfs-project/hadoop-hdfs/pom.xml b/hadoop-hdfs-project/hadoop-hdfs/pom.xml
-index f90644c..090923a 100644
---- a/hadoop-hdfs-project/hadoop-hdfs/pom.xml
-+++ b/hadoop-hdfs-project/hadoop-hdfs/pom.xml
-@@ -348,6 +348,7 @@ http://maven.apache.org/xsd/maven-4.0.0.xsd">
-                   <include>hdfs.proto</include>
-                   <include>encryption.proto</include>
-                   <include>inotify.proto</include>
-+                  <include>erasurecoding.proto</include>
-                 </includes>
-               </source>
-               <output>${project.build.directory}/generated-sources/java</output>
+diff --git a/hadoop-hdfs-project/hadoop-hdfs-client/src/main/proto/ClientNamenodeProtocol.proto b/hadoop-hdfs-project/hadoop-hdfs-client/src/main/proto/ClientNamenodeProtocol.proto
+index b44c556..2b64ca0 100644
+--- a/hadoop-hdfs-project/hadoop-hdfs-client/src/main/proto/ClientNamenodeProtocol.proto
++++ b/hadoop-hdfs-project/hadoop-hdfs-client/src/main/proto/ClientNamenodeProtocol.proto
+@@ -34,6 +34,7 @@ import "acl.proto";
+ import "xattr.proto";
+ import "encryption.proto";
+ import "inotify.proto";
++import "erasurecoding.proto";
+ 
+ /**
+  * The ClientNamenodeProtocol Service defines the interface between a client 
+@@ -856,8 +857,14 @@ service ClientNamenodeProtocol {
+       returns(ListEncryptionZonesResponseProto);
+   rpc getEZForPath(GetEZForPathRequestProto)
+       returns(GetEZForPathResponseProto);
++  rpc createErasureCodingZone(CreateErasureCodingZoneRequestProto)
++      returns(CreateErasureCodingZoneResponseProto);
+   rpc getCurrentEditLogTxid(GetCurrentEditLogTxidRequestProto)
+       returns(GetCurrentEditLogTxidResponseProto);
+   rpc getEditsFromTxid(GetEditsFromTxidRequestProto)
+       returns(GetEditsFromTxidResponseProto);
++  rpc getECSchemas(GetECSchemasRequestProto)
++      returns(GetECSchemasResponseProto);
++  rpc getErasureCodingZone(GetErasureCodingZoneRequestProto)
++      returns(GetErasureCodingZoneResponseProto);
+ }
+diff --git a/hadoop-hdfs-project/hadoop-hdfs-client/src/main/proto/erasurecoding.proto b/hadoop-hdfs-project/hadoop-hdfs-client/src/main/proto/erasurecoding.proto
+new file mode 100644
+index 0000000..e656659
+--- /dev/null
++++ b/hadoop-hdfs-project/hadoop-hdfs-client/src/main/proto/erasurecoding.proto
+@@ -0,0 +1,57 @@
++/**
++ * Licensed to the Apache Software Foundation (ASF) under one
++ * or more contributor license agreements.  See the NOTICE file
++ * distributed with this work for additional information
++ * regarding copyright ownership.  The ASF licenses this file
++ * to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance
++ * with the License.  You may obtain a copy of the License at
++ *
++ *     http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++option java_package = "org.apache.hadoop.hdfs.protocol.proto";
++option java_outer_classname = "ErasureCodingProtos";
++option java_generate_equals_and_hash = true;
++package hadoop.hdfs;
++
++import "hdfs.proto";
++
++/**
++ * ErasureCodingZone
++ */
++message ErasureCodingZoneProto {
++  required string dir = 1;
++  required ECSchemaProto schema = 2;
++  required uint32 cellSize = 3;
++}
++
++message CreateErasureCodingZoneRequestProto {
++  required string src = 1;
++  optional ECSchemaProto schema = 2;
++  optional uint32 cellSize = 3;
++}
++
++message CreateErasureCodingZoneResponseProto {
++}
++
++message GetECSchemasRequestProto { // void request
++}
++
++message GetECSchemasResponseProto {
++  repeated ECSchemaProto schemas = 1;
++}
++
++message GetErasureCodingZoneRequestProto {
++  required string src = 1; // path to get the zone info
++}
++
++message GetErasureCodingZoneResponseProto {
++  optional ErasureCodingZoneProto ECZone = 1;
++}
+diff --git a/hadoop-hdfs-project/hadoop-hdfs-client/src/main/proto/hdfs.proto b/hadoop-hdfs-project/hadoop-hdfs-client/src/main/proto/hdfs.proto
+index 86fb462..0b387f0 100644
+--- a/hadoop-hdfs-project/hadoop-hdfs-client/src/main/proto/hdfs.proto
++++ b/hadoop-hdfs-project/hadoop-hdfs-client/src/main/proto/hdfs.proto
+@@ -303,6 +303,25 @@ message LocatedBlocksProto {
+ }
+ 
+ /**
++ * ECSchema options entry
++ */
++message ECSchemaOptionEntryProto {
++  required string key = 1;
++  required string value = 2;
++}
++
++/**
++ * ECSchema for erasurecoding
++ */
++message ECSchemaProto {
++  required string schemaName = 1;
++  required string codecName = 2;
++  required uint32 dataUnits = 3;
++  required uint32 parityUnits = 4;
++  repeated ECSchemaOptionEntryProto options = 5;
++}
++
++/**
+  * Status of a file, directory or symlink
+  * Optionally includes a file's block locations if requested by client on the rpc call.
+  */
+@@ -336,7 +355,11 @@ message HdfsFileStatusProto {
+   optional FileEncryptionInfoProto fileEncryptionInfo = 15;
+ 
+   optional uint32 storagePolicy = 16 [default = 0]; // block storage policy id
+-} 
++
++  // Optional field for erasure coding
++  optional ECSchemaProto ecSchema = 17;
++  optional uint32 stripeCellSize = 18;
++}
+ 
+ /**
+  * Checksum algorithms/types used in HDFS
 diff --git a/hadoop-hdfs-project/hadoop-hdfs/src/main/bin/hdfs b/hadoop-hdfs-project/hadoop-hdfs/src/main/bin/hdfs
 index 2e09cef..dd4d71e 100755
 --- a/hadoop-hdfs-project/hadoop-hdfs/src/main/bin/hdfs
@@ -2012,139 +2145,6 @@ index 0000000..03026d8
 +    }
 +  }
 +}
-diff --git a/hadoop-hdfs-project/hadoop-hdfs/src/main/proto/ClientNamenodeProtocol.proto b/hadoop-hdfs-project/hadoop-hdfs/src/main/proto/ClientNamenodeProtocol.proto
-index b44c556..2b64ca0 100644
---- a/hadoop-hdfs-project/hadoop-hdfs/src/main/proto/ClientNamenodeProtocol.proto
-+++ b/hadoop-hdfs-project/hadoop-hdfs/src/main/proto/ClientNamenodeProtocol.proto
-@@ -34,6 +34,7 @@ import "acl.proto";
- import "xattr.proto";
- import "encryption.proto";
- import "inotify.proto";
-+import "erasurecoding.proto";
- 
- /**
-  * The ClientNamenodeProtocol Service defines the interface between a client 
-@@ -856,8 +857,14 @@ service ClientNamenodeProtocol {
-       returns(ListEncryptionZonesResponseProto);
-   rpc getEZForPath(GetEZForPathRequestProto)
-       returns(GetEZForPathResponseProto);
-+  rpc createErasureCodingZone(CreateErasureCodingZoneRequestProto)
-+      returns(CreateErasureCodingZoneResponseProto);
-   rpc getCurrentEditLogTxid(GetCurrentEditLogTxidRequestProto)
-       returns(GetCurrentEditLogTxidResponseProto);
-   rpc getEditsFromTxid(GetEditsFromTxidRequestProto)
-       returns(GetEditsFromTxidResponseProto);
-+  rpc getECSchemas(GetECSchemasRequestProto)
-+      returns(GetECSchemasResponseProto);
-+  rpc getErasureCodingZone(GetErasureCodingZoneRequestProto)
-+      returns(GetErasureCodingZoneResponseProto);
- }
-diff --git a/hadoop-hdfs-project/hadoop-hdfs/src/main/proto/erasurecoding.proto b/hadoop-hdfs-project/hadoop-hdfs/src/main/proto/erasurecoding.proto
-new file mode 100644
-index 0000000..e656659
---- /dev/null
-+++ b/hadoop-hdfs-project/hadoop-hdfs/src/main/proto/erasurecoding.proto
-@@ -0,0 +1,57 @@
-+/**
-+ * Licensed to the Apache Software Foundation (ASF) under one
-+ * or more contributor license agreements.  See the NOTICE file
-+ * distributed with this work for additional information
-+ * regarding copyright ownership.  The ASF licenses this file
-+ * to you under the Apache License, Version 2.0 (the
-+ * "License"); you may not use this file except in compliance
-+ * with the License.  You may obtain a copy of the License at
-+ *
-+ *     http://www.apache.org/licenses/LICENSE-2.0
-+ *
-+ * Unless required by applicable law or agreed to in writing, software
-+ * distributed under the License is distributed on an "AS IS" BASIS,
-+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-+ * See the License for the specific language governing permissions and
-+ * limitations under the License.
-+ */
-+
-+option java_package = "org.apache.hadoop.hdfs.protocol.proto";
-+option java_outer_classname = "ErasureCodingProtos";
-+option java_generate_equals_and_hash = true;
-+package hadoop.hdfs;
-+
-+import "hdfs.proto";
-+
-+/**
-+ * ErasureCodingZone
-+ */
-+message ErasureCodingZoneProto {
-+  required string dir = 1;
-+  required ECSchemaProto schema = 2;
-+  required uint32 cellSize = 3;
-+}
-+
-+message CreateErasureCodingZoneRequestProto {
-+  required string src = 1;
-+  optional ECSchemaProto schema = 2;
-+  optional uint32 cellSize = 3;
-+}
-+
-+message CreateErasureCodingZoneResponseProto {
-+}
-+
-+message GetECSchemasRequestProto { // void request
-+}
-+
-+message GetECSchemasResponseProto {
-+  repeated ECSchemaProto schemas = 1;
-+}
-+
-+message GetErasureCodingZoneRequestProto {
-+  required string src = 1; // path to get the zone info
-+}
-+
-+message GetErasureCodingZoneResponseProto {
-+  optional ErasureCodingZoneProto ECZone = 1;
-+}
-diff --git a/hadoop-hdfs-project/hadoop-hdfs/src/main/proto/hdfs.proto b/hadoop-hdfs-project/hadoop-hdfs/src/main/proto/hdfs.proto
-index 86fb462..0b387f0 100644
---- a/hadoop-hdfs-project/hadoop-hdfs/src/main/proto/hdfs.proto
-+++ b/hadoop-hdfs-project/hadoop-hdfs/src/main/proto/hdfs.proto
-@@ -303,6 +303,25 @@ message LocatedBlocksProto {
- }
- 
- /**
-+ * ECSchema options entry
-+ */
-+message ECSchemaOptionEntryProto {
-+  required string key = 1;
-+  required string value = 2;
-+}
-+
-+/**
-+ * ECSchema for erasurecoding
-+ */
-+message ECSchemaProto {
-+  required string schemaName = 1;
-+  required string codecName = 2;
-+  required uint32 dataUnits = 3;
-+  required uint32 parityUnits = 4;
-+  repeated ECSchemaOptionEntryProto options = 5;
-+}
-+
-+/**
-  * Status of a file, directory or symlink
-  * Optionally includes a file's block locations if requested by client on the rpc call.
-  */
-@@ -336,7 +355,11 @@ message HdfsFileStatusProto {
-   optional FileEncryptionInfoProto fileEncryptionInfo = 15;
- 
-   optional uint32 storagePolicy = 16 [default = 0]; // block storage policy id
--} 
-+
-+  // Optional field for erasure coding
-+  optional ECSchemaProto ecSchema = 17;
-+  optional uint32 stripeCellSize = 18;
-+}
- 
- /**
-  * Checksum algorithms/types used in HDFS
 diff --git a/hadoop-hdfs-project/hadoop-hdfs/src/test/java/org/apache/hadoop/cli/CLITestCmdErasureCoding.java b/hadoop-hdfs-project/hadoop-hdfs/src/test/java/org/apache/hadoop/cli/CLITestCmdErasureCoding.java
 new file mode 100644
 index 0000000..6c06a8d
